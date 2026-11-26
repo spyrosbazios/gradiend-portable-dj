@@ -103,22 +103,32 @@ export async function importFromMyInstants(
     }
   }
 
-  // 2) Static GitHub Pages fallback via public CORS proxies
-  const proxies = [
-    (u: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-    (u: string) => `https://corsproxy.io/?${encodeURIComponent(u)}`,
+  // 2) Static GitHub Pages fallback via Jina HTML reader (CORS-enabled) + AllOrigins backup
+  const htmlFetchers: Array<() => Promise<Response>> = [
+    () =>
+      fetch(`https://r.jina.ai/${parsed.toString()}`, {
+        headers: { "X-Return-Format": "html" },
+        signal: AbortSignal.timeout(8000),
+      }),
+    () =>
+      fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(parsed.toString())}`, {
+        signal: AbortSignal.timeout(6000),
+      }),
   ];
 
   let html: string | null = null;
-  for (const makeProxy of proxies) {
+  for (const runFetch of htmlFetchers) {
     try {
-      const res = await fetch(makeProxy(parsed.toString()));
+      const res = await runFetch();
       if (res.ok) {
-        html = await res.text();
-        break;
+        const text = await res.text();
+        if (text.includes("/media/sounds/")) {
+          html = text;
+          break;
+        }
       }
     } catch {
-      // try next proxy
+      // try next fallback
     }
   }
 
@@ -131,26 +141,12 @@ export async function importFromMyInstants(
     throw new Error("Could not find an audio clip on that MyInstants page.");
   }
 
-  // Best-effort offline cache of the MP3 bytes via proxy; if blocked, <audio> still plays sourceUrl directly!
-  let audioData: ArrayBuffer | undefined;
-  for (const makeProxy of proxies) {
-    try {
-      const audioRes = await fetch(makeProxy(meta.mp3Url));
-      if (audioRes.ok) {
-        audioData = await audioRes.arrayBuffer();
-        break;
-      }
-    } catch {
-      // fall back to direct sourceUrl playback
-    }
-  }
-
+  // <audio src="..."> plays cross-origin MP3s directly without CORS headers
   return {
     id: `pad-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     label: customLabel?.trim() || meta.title,
     sourceUrl: meta.mp3Url,
     mimeType: "audio/mpeg",
-    audioData,
   };
 }
 
