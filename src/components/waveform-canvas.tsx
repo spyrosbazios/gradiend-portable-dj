@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { motion, useMotionValue, useSpring, useTransform } from "framer-motion";
 import { Lock } from "lucide-react";
 import type { DeckId } from "@/core/dj-math";
+import { useTheme } from "@/hooks/use-theme";
 import { cn } from "@/lib/utils";
 
 interface WaveformCanvasProps {
@@ -62,6 +63,7 @@ export function WaveformCanvas({
   const baseCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const activeCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const { theme } = useTheme();
 
   const rawProgress = useMotionValue(progress);
   const smoothProgress = useSpring(rawProgress, {
@@ -108,7 +110,7 @@ export function WaveformCanvas({
     const ro = new ResizeObserver(render);
     ro.observe(container);
     return () => ro.disconnect();
-  }, [deckId, peaks]);
+  }, [deckId, peaks, theme]);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!hasTrack || locked) return;

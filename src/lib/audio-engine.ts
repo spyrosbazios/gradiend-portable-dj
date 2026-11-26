@@ -2,9 +2,9 @@ import {
   computeWaveformAndAutoGain,
   detectAudibleBounds,
   equalPowerGains,
-  estimateBpm,
   type DeckId,
 } from "@/core/dj-math";
+import { bpmScheduler } from "@/lib/bpm-scheduler";
 
 export interface TrackItem {
   id: string;
@@ -43,6 +43,7 @@ interface DeckInternals {
   autoGainNode: GainNode | null;
   crossfadeGainNode: GainNode | null;
   softStopGainNode: GainNode | null;
+  softStopTimerId: number | null;
   objectUrl: string | null;
   loadSeq: number;
   snapshot: DeckSnapshot;
@@ -94,6 +95,7 @@ export class DjAudioEngine {
       autoGainNode: null,
       crossfadeGainNode: null,
       softStopGainNode: null,
+      softStopTimerId: null,
       objectUrl: null,
       loadSeq: 0,
       snapshot: emptyDeck(),
@@ -249,6 +251,10 @@ export class DjAudioEngine {
     const d = this.decks[id];
     const seq = ++d.loadSeq;
 
+    if (d.softStopTimerId !== null) {
+      window.clearTimeout(d.softStopTimerId);
+      d.softStopTimerId = null;
+    }
     d.audio.pause();
     if (d.objectUrl) {
       URL.revokeObjectURL(d.objectUrl);
@@ -292,18 +298,21 @@ export class DjAudioEngine {
           ? await fetch(track.remoteUrl).then((r) => r.arrayBuffer())
           : null;
       if (!arrayBuf || d.loadSeq !== seq) return;
-      const offlineCtx = new OfflineAudioContext(1, 1, 44100);
-      const audioBuf = await offlineCtx.decodeAudioData(arrayBuf.slice(0));
+      // 22.05 kHz mono halves decode RAM & CPU while preserving waveform, loudness, and BPM accuracy
+      const offlineCtx = new OfflineAudioContext(1, 1, 22050);
+      const audioBuf = await offlineCtx.decodeAudioData(arrayBuf);
       if (d.loadSeq !== seq) return;
 
       const channelData = audioBuf.getChannelData(0);
       const { peaks, autoGain } = computeWaveformAndAutoGain(channelData, 160);
-      const detectedBpm = track.bpm ?? estimateBpm(channelData, audioBuf.sampleRate);
       const { cueInSec, cueOutSec } = detectAudibleBounds(
         channelData,
         audioBuf.sampleRate,
         2.5,
       );
+      const detectedBpm =
+        track.bpm ?? (await bpmScheduler.computeInWorker(channelData, audioBuf.sampleRate));
+      if (d.loadSeq !== seq) return;
 
       d.snapshot = {
         ...d.snapshot,
@@ -331,6 +340,11 @@ export class DjAudioEngine {
     const d = this.decks[id];
     if (!d.snapshot.track) return;
 
+    if (d.softStopTimerId !== null) {
+      window.clearTimeout(d.softStopTimerId);
+      d.softStopTimerId = null;
+    }
+
     if (d.softStopGainNode && this.ctx) {
       d.softStopGainNode.gain.cancelScheduledValues(this.ctx.currentTime);
       d.softStopGainNode.gain.setValueAtTime(1, this.ctx.currentTime);
@@ -345,12 +359,18 @@ export class DjAudioEngine {
     const d = this.decks[id];
     if (d.audio.paused) return;
 
+    if (d.softStopTimerId !== null) {
+      window.clearTimeout(d.softStopTimerId);
+      d.softStopTimerId = null;
+    }
+
     if (d.softStopGainNode && this.ctx) {
       const now = this.ctx.currentTime;
       d.softStopGainNode.gain.cancelScheduledValues(now);
       d.softStopGainNode.gain.setValueAtTime(d.softStopGainNode.gain.value, now);
       d.softStopGainNode.gain.linearRampToValueAtTime(0.0001, now + 0.35);
-      window.setTimeout(() => {
+      d.softStopTimerId = window.setTimeout(() => {
+        d.softStopTimerId = null;
         d.audio.pause();
         if (d.softStopGainNode && this.ctx) {
           d.softStopGainNode.gain.setValueAtTime(1, this.ctx.currentTime);

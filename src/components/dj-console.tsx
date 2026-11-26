@@ -204,6 +204,8 @@ export function DjConsole({
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const hydratingRef = useRef<Set<string>>(new Set());
+  const metaQueueRef = useRef<TrackItem[]>([]);
+  const metaActiveCountRef = useRef(0);
   const autoFadeTriggeredForRef = useRef<string | null>(null);
   const autoPickTriggeredForRef = useRef<string | null>(null);
   const queueSeqRef = useRef(0);
@@ -433,6 +435,8 @@ export function DjConsole({
       autoFadeTriggeredForRef.current = triggerKey;
       toast.info(`Auto-fading to ${idleSnapshot.track.title}`);
       void djEngine.startAutoFade(idleDeck, fadeSeconds * 1000, (oldDeck) => {
+        autoFadeTriggeredForRef.current = null;
+        autoPickTriggeredForRef.current = null;
         stageNextFromQueue(oldDeck);
       });
     }
@@ -456,6 +460,9 @@ export function DjConsole({
   const applyLoadedTracks = useCallback((name: string, loaded: TrackItem[]) => {
     setTracks(loaded);
     hydratingRef.current.clear();
+    metaQueueRef.current = [];
+    autoFadeTriggeredForRef.current = null;
+    autoPickTriggeredForRef.current = null;
     bpmScheduler.reset();
 
     if (loaded.length === 0) {
@@ -512,15 +519,33 @@ export function DjConsole({
     e.target.value = "";
   };
 
-  const handleRequestMetadata = useCallback((track: TrackItem) => {
-    if (track.metadataLoaded || hydratingRef.current.has(track.id)) return;
-    hydratingRef.current.add(track.id);
-    void hydrateTrackMetadata(track).then((patch) => {
-      setTracks((prev) =>
-        prev.map((item) => (item.id === track.id ? { ...item, ...patch } : item)),
-      );
-    });
+  const drainMetaQueue = useCallback(() => {
+    while (metaActiveCountRef.current < 3 && metaQueueRef.current.length > 0) {
+      const nextTrack = metaQueueRef.current.shift();
+      if (!nextTrack) break;
+      metaActiveCountRef.current++;
+      void hydrateTrackMetadata(nextTrack)
+        .then((patch) => {
+          setTracks((prev) =>
+            prev.map((item) => (item.id === nextTrack.id ? { ...item, ...patch } : item)),
+          );
+        })
+        .finally(() => {
+          metaActiveCountRef.current--;
+          drainMetaQueue();
+        });
+    }
   }, []);
+
+  const handleRequestMetadata = useCallback(
+    (track: TrackItem) => {
+      if (track.metadataLoaded || hydratingRef.current.has(track.id)) return;
+      hydratingRef.current.add(track.id);
+      metaQueueRef.current.push(track);
+      drainMetaQueue();
+    },
+    [drainMetaQueue],
+  );
 
   const handleLoadNext = useCallback(
     (track: TrackItem, force = false) => {
@@ -611,6 +636,8 @@ export function DjConsole({
       return;
     }
     void djEngine.startAutoFade(idleDeck, fadeSeconds * 1000, (oldDeck) => {
+      autoFadeTriggeredForRef.current = null;
+      autoPickTriggeredForRef.current = null;
       stageNextFromQueue(oldDeck);
     });
   }, [idleDeck, idleSnapshot.track, isAutoFading, fadeSeconds, stageNextFromQueue]);

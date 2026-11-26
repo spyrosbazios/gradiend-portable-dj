@@ -87,6 +87,13 @@ export class BpmScheduler {
   }
 
   /**
+   * Computes BPM off the main thread in the shared Web Worker.
+   */
+  computeInWorker(channelData: Float32Array, sampleRate: number): Promise<number | null> {
+    return this.workerClient.compute(channelData, sampleRate);
+  }
+
+  /**
    * Briefly pauses background decoding while the user is actively rapid-scrolling.
    */
   notifyScrollActivity(cooldownMs = 220): void {
@@ -266,7 +273,7 @@ export class BpmScheduler {
       if (!arrayBuf) return null;
 
       const offlineCtx = new OfflineAudioContext(1, 1, 22050);
-      const audioBuf = await offlineCtx.decodeAudioData(arrayBuf.slice(0));
+      const audioBuf = await offlineCtx.decodeAudioData(arrayBuf);
       if (signal.aborted) return "aborted";
 
       const bpm = await this.workerClient.compute(
