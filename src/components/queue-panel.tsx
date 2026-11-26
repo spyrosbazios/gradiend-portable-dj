@@ -1,4 +1,4 @@
-import { AnimatePresence, Reorder, useDragControls } from "framer-motion";
+import { AnimatePresence, motion, Reorder, useDragControls } from "framer-motion";
 import {
   Activity,
   AlertTriangle,
@@ -86,14 +86,23 @@ function QueueRow({ entry, index, prevBpm, onLoadAt, onRemoveAt }: QueueRowProps
       value={entry}
       dragListener={false}
       dragControls={dragControls}
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, x: 16 }}
+      layout="position"
+      initial={{ opacity: 0, scale: 0.97 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{
+        opacity: 0,
+        scale: 0.96,
+        transition: { duration: 0.14, ease: "easeOut" },
+      }}
       whileDrag={{
         scale: 1.02,
         zIndex: 20,
       }}
-      transition={{ type: "spring", stiffness: 520, damping: 36 }}
+      transition={{
+        layout: { duration: 0.18, ease: [0.22, 1, 0.36, 1] },
+        opacity: { duration: 0.15, ease: "easeOut" },
+        scale: { duration: 0.15, ease: "easeOut" },
+      }}
       className={cn(
         "group relative flex items-center gap-2 overflow-hidden rounded-lg border bg-bg/85 py-1.5 pr-1.5 pl-2 shadow-xs select-none",
         fit?.status === "clash"
@@ -216,7 +225,7 @@ export function QueuePanel({
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-2.5 pb-[calc(var(--under-tabs,0px)+1rem)]">
+      <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto p-2.5 pb-[calc(var(--under-tabs,0px)+1rem)]">
         {stagedTrack && (
           <div
             className={cn(
@@ -263,21 +272,14 @@ export function QueuePanel({
           </div>
         )}
 
-        {queue.length === 0 ? (
-          <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
-            <div className="flex size-10 items-center justify-center rounded-xl bg-raised text-faint">
-              <ListMusic className="size-5" />
-            </div>
-            <p className="text-xs font-medium text-dim">Queue is empty</p>
-          </div>
-        ) : (
+        <div className="relative">
           <Reorder.Group
             axis="y"
             values={queue}
             onReorder={onReorder}
-            className="space-y-1.5"
+            className="relative space-y-1.5"
           >
-            <AnimatePresence initial={false}>
+            <AnimatePresence initial={false} mode="popLayout">
               {queue.map((entry, idx) => {
                 const prevBpm =
                   idx === 0
@@ -296,7 +298,21 @@ export function QueuePanel({
               })}
             </AnimatePresence>
           </Reorder.Group>
-        )}
+
+          {queue.length === 0 && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.16, delay: 0.12, ease: "easeOut" }}
+              className="flex flex-col items-center justify-center gap-2 py-8 text-center"
+            >
+              <div className="flex size-10 items-center justify-center rounded-xl bg-raised text-faint">
+                <ListMusic className="size-5" />
+              </div>
+              <p className="text-xs font-medium text-dim">Queue is empty</p>
+            </motion.div>
+          )}
+        </div>
       </div>
     </section>
   );

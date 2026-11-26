@@ -598,6 +598,16 @@ export function DjConsole({
 
   const handleAddToQueue = useCallback(
     (track: TrackItem, force = false) => {
+      if (queueRef.current.some((entry) => entry.track.id === track.id)) {
+        toast.info(`“${track.title}” is already in the queue`);
+        return;
+      }
+
+      if (idleSnapshot.track?.id === track.id) {
+        toast.info(`“${track.title}” is already staged on Deck ${idleDeck}`);
+        return;
+      }
+
       if (!force && playedIds.has(track.id)) {
         toast.warning(`“${track.title}” was already played this session`, {
           action: {
