@@ -14,9 +14,14 @@ export function PwaUpdater() {
       if (!registration) return;
       regRef.current = registration;
       window.setInterval(() => {
-        void registration.update().then(() => {
-          if (registration.waiting) setNeedRefresh(true);
-        });
+        void registration
+          .update()
+          .then(() => {
+            if (registration.waiting) setNeedRefresh(true);
+          })
+          .catch(() => {
+            // Offline at venue — ignore update check failures
+          });
       }, 60 * 60 * 1000);
     },
   });
@@ -24,9 +29,14 @@ export function PwaUpdater() {
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState === "visible" && regRef.current) {
-        void regRef.current.update().then(() => {
-          if (regRef.current?.waiting) setNeedRefresh(true);
-        });
+        void regRef.current
+          .update()
+          .then(() => {
+            if (regRef.current?.waiting) setNeedRefresh(true);
+          })
+          .catch(() => {
+            // Offline at venue — ignore update check failures
+          });
       }
     };
     document.addEventListener("visibilitychange", onVisible);

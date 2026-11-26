@@ -25,34 +25,69 @@ class BpmWorkerClient {
   private seq = 0;
   private pending = new Map<number, (bpm: number | null) => void>();
 
+  private resetWorker(): void {
+    if (this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+    }
+    for (const resolve of this.pending.values()) {
+      resolve(null);
+    }
+    this.pending.clear();
+  }
+
   private ensureWorker(): Worker | null {
     if (typeof Worker === "undefined") return null;
     if (!this.worker) {
-      this.worker = new Worker(new URL("./bpm.worker.ts", import.meta.url), {
-        type: "module",
-      });
-      this.worker.addEventListener("message", (e: MessageEvent<{ id: number; bpm: number | null }>) => {
-        const resolve = this.pending.get(e.data.id);
-        if (resolve) {
-          this.pending.delete(e.data.id);
-          resolve(e.data.bpm);
-        }
-      });
+      try {
+        this.worker = new Worker(new URL("./bpm.worker.ts", import.meta.url), {
+          type: "module",
+        });
+        this.worker.addEventListener("message", (e: MessageEvent<{ id: number; bpm: number | null }>) => {
+          const resolve = this.pending.get(e.data.id);
+          if (resolve) {
+            this.pending.delete(e.data.id);
+            resolve(e.data.bpm);
+          }
+        });
+        this.worker.addEventListener("error", () => {
+          this.resetWorker();
+        });
+        this.worker.addEventListener("messageerror", () => {
+          this.resetWorker();
+        });
+      } catch {
+        this.worker = null;
+        return null;
+      }
     }
     return this.worker;
   }
 
   compute(channelData: Float32Array, sampleRate: number): Promise<number | null> {
+    if (sampleRate <= 0 || channelData.length < sampleRate * 4) {
+      return Promise.resolve(null);
+    }
+
+    // Slice ONLY the 28s middle window used by estimateBpm (~2.4 MB vs ~25 MB full song)
+    const maxSamples = Math.min(channelData.length, Math.floor(sampleRate * 28));
+    const startOffset = Math.max(0, Math.floor((channelData.length - maxSamples) / 2));
+    const slice = channelData.slice(startOffset, startOffset + maxSamples);
+
     const worker = this.ensureWorker();
     if (!worker) {
-      return Promise.resolve(estimateBpm(channelData, sampleRate));
+      return Promise.resolve(estimateBpm(slice, sampleRate));
     }
 
     const id = ++this.seq;
-    const copy = new Float32Array(channelData);
     return new Promise((resolve) => {
       this.pending.set(id, resolve);
-      worker.postMessage({ id, samples: copy, sampleRate }, [copy.buffer]);
+      try {
+        worker.postMessage({ id, samples: slice, sampleRate }, [slice.buffer]);
+      } catch {
+        this.pending.delete(id);
+        resolve(estimateBpm(slice, sampleRate));
+      }
     });
   }
 }
@@ -78,6 +113,7 @@ export class BpmScheduler {
   private running = false;
   private generation = 0;
   private pauseUntilTs = 0;
+  private pausedForFade = false;
   private activeAbort: { priority: BpmPriority; controller: AbortController } | null = null;
   private workerClient = new BpmWorkerClient();
   private onResult: BpmResultCallback | null = null;
@@ -91,6 +127,45 @@ export class BpmScheduler {
    */
   computeInWorker(channelData: Float32Array, sampleRate: number): Promise<number | null> {
     return this.workerClient.compute(channelData, sampleRate);
+  }
+
+  /**
+   * Records a BPM already computed during deck loading so background scanning
+   * never decodes the same file twice and caches it to IndexedDB immediately.
+   */
+  recordResult(track: TrackItem, bpm: number, duration?: number): void {
+    this.completedIds.add(track.id);
+    if (this.queuedMap.has(track.id)) {
+      this.queuedMap.delete(track.id);
+      this.queue = this.queue.filter((j) => j.track.id !== track.id);
+    }
+    this.onResult?.(track.id, bpm);
+    const key = cacheKeyForTrack(track);
+    void (async () => {
+      try {
+        const existing = await get<CachedMeta>(key);
+        await set(key, {
+          title: existing?.title ?? track.title,
+          artist: existing?.artist ?? track.artist,
+          duration: existing?.duration ?? duration ?? track.duration,
+          bpm,
+          coverUrl: existing?.coverUrl ?? track.coverUrl,
+        });
+      } catch {
+        // ignore quota errors
+      }
+    })();
+  }
+
+  /**
+   * Pauses background decoding during active crossfades so zero audio-decode
+   * spikes compete with a live Smart Mix transition.
+   */
+  setPausedForFade(paused: boolean): void {
+    this.pausedForFade = paused;
+    if (paused && this.activeAbort?.priority === "low") {
+      this.activeAbort.controller.abort();
+    }
   }
 
   /**
@@ -204,6 +279,10 @@ export class BpmScheduler {
     this.running = true;
     try {
       while (this.queue.length > 0 && this.generation === gen) {
+        if (this.pausedForFade) {
+          await yieldIdle(250);
+          continue;
+        }
         const waitMs = this.pauseUntilTs - performance.now();
         if (waitMs > 0) {
           await yieldIdle(Math.min(waitMs, 250));
@@ -235,13 +314,13 @@ export class BpmScheduler {
           this.onResult?.(job.track.id, result);
         }
 
-        // Fast turnaround for focus window; gentle breather for background trickle
+        // Fast turnaround for focus window; gentle breather for background trickle (400-song friendly)
         const delayMs =
           job.priority === "high" || job.priority === "queued"
-            ? 8
+            ? 12
             : job.priority === "medium"
-              ? 16
-              : 140;
+              ? 24
+              : 350;
         await yieldIdle(delayMs);
       }
     } finally {

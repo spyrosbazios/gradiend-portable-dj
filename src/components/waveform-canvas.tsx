@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import { motion, useMotionValue, useSpring, useTransform } from "framer-motion";
 import { Lock } from "lucide-react";
 import type { DeckId } from "@/core/dj-math";
@@ -51,7 +51,7 @@ function drawBars(
   }
 }
 
-export function WaveformCanvas({
+export const WaveformCanvas = memo(function WaveformCanvas({
   deckId,
   peaks,
   loading,
@@ -167,4 +167,4 @@ export function WaveformCanvas({
       )}
     </div>
   );
-}
+});

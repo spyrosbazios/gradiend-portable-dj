@@ -128,34 +128,40 @@ export const LibraryPanel = memo(function LibraryPanel({
   const virtualItems = virtualizer.getVirtualItems();
   const firstVisibleIdx = virtualItems[0]?.index ?? -1;
   const lastVisibleIdx = virtualItems[virtualItems.length - 1]?.index ?? -1;
+  const tracksRef = useRef(tracks);
+  tracksRef.current = tracks;
+  const activeTrackId = activeTrack?.id ?? null;
 
   // Debounce metadata/cover hydration (120ms) so fast scrolling doesn't fetch/parse rows you fly past
   useEffect(() => {
     if (firstVisibleIdx < 0 || lastVisibleIdx < firstVisibleIdx) return;
     const timer = window.setTimeout(() => {
+      const list = tracksRef.current;
       for (let i = firstVisibleIdx; i <= lastVisibleIdx; i++) {
-        const track = tracks[i];
+        const track = list[i];
         if (track && !track.metadataLoaded) {
           onRequestMetadata(track);
         }
       }
     }, 120);
     return () => window.clearTimeout(timer);
-  }, [firstVisibleIdx, lastVisibleIdx, tracks, onRequestMetadata]);
+  }, [firstVisibleIdx, lastVisibleIdx, tracks.length, query, sortMode, onRequestMetadata]);
 
   // Focus BPM calculation on selected song + alternating neighbors (+1, -1, +2, -2, ..., +5, -5)
   // Debounced (140ms) so holding ArrowDown skips intermediate rows and starts right where you land
   useEffect(() => {
-    if (clampedIndex < 0) return;
-    const selected = tracks[clampedIndex];
-    if (!selected) return;
+    if (clampedIndex < 0 || !activeTrackId) return;
 
     const timer = window.setTimeout(() => {
+      const list = tracksRef.current;
+      const selected = list[clampedIndex];
+      if (!selected) return;
+
       const neighbors: TrackItem[] = [];
       for (let dist = 1; dist <= 5; dist++) {
-        const after = tracks[clampedIndex + dist];
+        const after = list[clampedIndex + dist];
         if (after && after.bpm === null) neighbors.push(after);
-        const before = tracks[clampedIndex - dist];
+        const before = list[clampedIndex - dist];
         if (before && before.bpm === null) neighbors.push(before);
       }
 
@@ -165,7 +171,7 @@ export const LibraryPanel = memo(function LibraryPanel({
     }, 140);
 
     return () => window.clearTimeout(timer);
-  }, [clampedIndex, tracks, onPrioritizeBpm]);
+  }, [clampedIndex, activeTrackId, tracks.length, query, sortMode, onPrioritizeBpm]);
 
   const moveSelection = useCallback(
     (delta: number, isRapidRepeat = false) => {

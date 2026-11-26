@@ -183,6 +183,7 @@ class SoundboardPlayer {
     audio.volume = Math.min(1, Math.max(0, volume));
     audio.currentTime = 0;
     audio.onended = () => onEnd?.();
+    audio.onerror = () => onEnd?.();
     void audio.play().catch(() => {
       onEnd?.();
     });

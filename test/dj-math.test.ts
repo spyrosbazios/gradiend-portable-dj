@@ -75,10 +75,13 @@ describe("formatTime & filename helpers", () => {
     });
   });
 
-  test("recognizes supported audio extensions", () => {
+  test("recognizes supported audio extensions and rejects macOS ._ resource forks", () => {
     expect(isAudioFile("track.mp3")).toBe(true);
     expect(isAudioFile("track.FLAC")).toBe(true);
     expect(isAudioFile("cover.jpg")).toBe(false);
+    expect(isAudioFile("._track.mp3")).toBe(false);
+    expect(isAudioFile("Music/._Greek Song.mp3")).toBe(false);
+    expect(isAudioFile(".DS_Store")).toBe(false);
   });
 });
 

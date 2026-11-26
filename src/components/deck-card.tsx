@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Disc3, Lock, Play, Sparkles, Square, Unlock } from "lucide-react";
 import { formatTime, type DeckId } from "@/core/dj-math";
@@ -23,7 +23,7 @@ interface DeckCardProps {
   onToggleLock: () => void;
 }
 
-export function DeckCard({
+export const DeckCard = memo(function DeckCard({
   deckId,
   deck,
   isLive,
@@ -302,4 +302,4 @@ export function DeckCard({
       </motion.section>
     </div>
   );
-}
+});

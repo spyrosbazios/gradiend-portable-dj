@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { AnimatePresence, motion, Reorder, useDragControls } from "framer-motion";
 import {
   Activity,
@@ -185,7 +186,7 @@ function QueueRow({ entry, index, prevBpm, onLoadAt, onRemoveAt }: QueueRowProps
   );
 }
 
-export function QueuePanel({
+export const QueuePanel = memo(function QueuePanel({
   queue,
   liveBpm,
   stagedTrack,
@@ -316,4 +317,4 @@ export function QueuePanel({
       </div>
     </section>
   );
-}
+});

@@ -3,7 +3,10 @@ export type DeckId = "A" | "B";
 const AUDIO_EXT_RE = /\.(mp3|m4a|wav|flac|ogg|aac|opus|webm)$/i;
 
 export function isAudioFile(filename: string): boolean {
-  return AUDIO_EXT_RE.test(filename);
+  const base = filename.split(/[/\\]/).pop() ?? filename;
+  // Ignore macOS AppleDouble resource forks (._Song.mp3) and hidden dotfiles on USB sticks
+  if (!base || base.startsWith(".")) return false;
+  return AUDIO_EXT_RE.test(base);
 }
 
 export function equalPowerGains(crossfade: number): { gainA: number; gainB: number } {

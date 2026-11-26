@@ -1,6 +1,6 @@
 import { get, getMany, set } from "idb-keyval";
 import { parseBlob } from "music-metadata";
-import { estimateBpm, isAudioFile, parseFilenameMetadata } from "@/core/dj-math";
+import { isAudioFile, parseFilenameMetadata } from "@/core/dj-math";
 import type { TrackItem } from "@/lib/audio-engine";
 import { FOLDER_HANDLE_KEY, META_CACHE_PREFIX } from "@/lib/storage-keys";
 
@@ -71,48 +71,43 @@ export function filesToTrackItems(files: File[]): TrackItem[] {
   });
 }
 
-export async function loadDevServerTracks(): Promise<{
-  folderName: string;
-  tracks: TrackItem[];
-} | null> {
-  const res = await fetch("/__dev-music/list");
-  if (!res.ok) return null;
-  const data = (await res.json()) as {
-    folderName: string;
-    tracks: Array<{ relPath: string; filename: string; size: number; lastModified: number }>;
-  };
-
-  const tracks: TrackItem[] = data.tracks.map((item, idx) => {
-    const parsed = parseFilenameMetadata(item.filename);
-    return {
-      id: `dev:${item.relPath}:${item.size}:${idx}`,
-      remoteUrl: `/__dev-music/file?path=${encodeURIComponent(item.relPath)}`,
-      size: item.size,
-      lastModified: item.lastModified,
-      filename: item.filename,
-      title: parsed.title,
-      artist: parsed.artist,
-      duration: null,
-      bpm: null,
-      coverUrl: null,
-      metadataLoaded: false,
-    };
-  });
-
-  return { folderName: `${data.folderName} (Server)`, tracks };
-}
+const IGNORED_DIRS = new Set([
+  "System Volume Information",
+  "$RECYCLE.BIN",
+  ".Spotlight-V100",
+  ".Trashes",
+  ".fseventsd",
+  "__MACOSX",
+]);
 
 async function collectFilesFromDirectory(dirHandle: DirHandleLike): Promise<File[]> {
   const results: File[] = [];
-  for await (const entry of dirHandle.values()) {
-    if (entry.kind === "file") {
-      const fileHandle = entry as FileSystemFileHandle;
-      const file = await fileHandle.getFile();
-      if (isAudioFile(file.name)) results.push(file);
-    } else if (entry.kind === "directory") {
-      const sub = await collectFilesFromDirectory(entry as unknown as DirHandleLike);
-      results.push(...sub);
+  try {
+    for await (const entry of dirHandle.values()) {
+      const name = entry.name ?? "";
+      if (!name || name.startsWith(".") || IGNORED_DIRS.has(name)) continue;
+
+      if (entry.kind === "file") {
+        // Check extension BEFORE opening file handle to skip images/PDFs/system files on USB
+        if (!isAudioFile(name)) continue;
+        try {
+          const fileHandle = entry as FileSystemFileHandle;
+          const file = await fileHandle.getFile();
+          if (file.size > 0) results.push(file);
+        } catch {
+          // Skip unreadable or locked file without aborting the rest of the library
+        }
+      } else if (entry.kind === "directory") {
+        try {
+          const sub = await collectFilesFromDirectory(entry as unknown as DirHandleLike);
+          results.push(...sub);
+        } catch {
+          // Skip unreadable subdirectories (e.g. OS-protected folders on FAT32/exFAT)
+        }
+      }
     }
+  } catch {
+    // Return whatever was collected if directory enumeration fails partway
   }
   return results;
 }
@@ -234,47 +229,5 @@ export async function hydrateTrackMetadata(track: TrackItem): Promise<Partial<Tr
     return { ...toCache, metadataLoaded: true };
   } catch {
     return { metadataLoaded: true };
-  }
-}
-
-export async function analyzeTrackBpm(track: TrackItem): Promise<number | null> {
-  if (track.bpm !== null) return track.bpm;
-  const key = cacheKeyForTrack(track);
-  try {
-    const cached = await get<CachedMeta>(key);
-    if (cached?.bpm) return cached.bpm;
-  } catch {
-    // ignore
-  }
-
-  try {
-    const arrayBuf = track.file
-      ? await track.file.arrayBuffer()
-      : track.remoteUrl
-        ? await fetch(track.remoteUrl).then((r) => r.arrayBuffer())
-        : null;
-    if (!arrayBuf) return null;
-
-    const offlineCtx = new OfflineAudioContext(1, 1, 22050);
-    const audioBuf = await offlineCtx.decodeAudioData(arrayBuf.slice(0));
-    const bpm = estimateBpm(audioBuf.getChannelData(0), audioBuf.sampleRate);
-
-    if (bpm) {
-      try {
-        const existing = await get<CachedMeta>(key);
-        await set(key, {
-          title: existing?.title ?? track.title,
-          artist: existing?.artist ?? track.artist,
-          duration: existing?.duration ?? audioBuf.duration ?? track.duration,
-          bpm,
-          coverUrl: existing?.coverUrl ?? track.coverUrl,
-        });
-      } catch {
-        // ignore quota errors
-      }
-    }
-    return bpm;
-  } catch {
-    return null;
   }
 }

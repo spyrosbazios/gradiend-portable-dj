@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { ArrowLeft, ArrowLeftRight, ArrowRight, Sparkles } from "lucide-react";
 import type { DeckId, MixMode } from "@/core/dj-math";
 import { cn } from "@/lib/utils";
@@ -38,7 +39,7 @@ const MIX_MODES: ReadonlyArray<{ id: MixMode; label: string; title: string }> = 
   },
 ];
 
-export function CrossfaderPanel({
+export const CrossfaderPanel = memo(function CrossfaderPanel({
   crossfade,
   isAutoFading,
   fadeSeconds,
@@ -166,4 +167,4 @@ export function CrossfaderPanel({
       </div>
     </section>
   );
-}
+});

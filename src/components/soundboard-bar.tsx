@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { memo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Link2, Loader2, Plus, Trash2, Upload, Volume2 } from "lucide-react";
 import { toast } from "sonner";
@@ -27,7 +27,7 @@ interface SoundboardBarProps {
   onRemovePad: (padId: string) => void;
 }
 
-export function SoundboardBar({
+export const SoundboardBar = memo(function SoundboardBar({
   pads,
   activePadIds,
   onTriggerPad,
@@ -213,4 +213,4 @@ export function SoundboardBar({
       </Dialog>
     </div>
   );
-}
+});

@@ -87,7 +87,12 @@ export class DjAudioEngine {
   private fadeRafId: number | null = null;
   private isAutoFading = false;
   private listeners = new Set<EngineListener>();
+  private onDeckEnded: ((id: DeckId) => void) | null = null;
   private rafTickId: number | null = null;
+
+  setOnDeckEnded(cb: ((id: DeckId) => void) | null): void {
+    this.onDeckEnded = cb;
+  }
 
   constructor() {
     this.decks = {
@@ -155,6 +160,7 @@ export class DjAudioEngine {
     });
 
     audio.addEventListener("ended", () => {
+      const wasAudible = this.isDeckAudible(id);
       internals.snapshot = {
         ...internals.snapshot,
         isPlaying: false,
@@ -162,6 +168,9 @@ export class DjAudioEngine {
         waveformLocked: false,
       };
       this.emit();
+      if (wasAudible && !this.isAutoFading) {
+        this.onDeckEnded?.(id);
+      }
     });
 
     return internals;
@@ -439,6 +448,10 @@ export class DjAudioEngine {
         track.bpm ?? (await bpmScheduler.computeInWorker(channelData, audioBuf.sampleRate));
       if (d.loadSeq !== seq) return;
 
+      if (track.bpm === null && detectedBpm !== null) {
+        bpmScheduler.recordResult(track, detectedBpm, audioBuf.duration);
+      }
+
       d.snapshot = {
         ...d.snapshot,
         duration: audioBuf.duration || d.snapshot.duration,
@@ -460,14 +473,18 @@ export class DjAudioEngine {
     }
   }
 
-  async play(id: DeckId): Promise<void> {
+  async play(id: DeckId, resetDsp = true): Promise<boolean> {
     this.ensureAudioGraph();
     const d = this.decks[id];
-    if (!d.snapshot.track) return;
+    if (!d.snapshot.track) return false;
 
     if (d.softStopTimerId !== null) {
       window.clearTimeout(d.softStopTimerId);
       d.softStopTimerId = null;
+    }
+
+    if (resetDsp && !this.isAutoFading) {
+      this.resetDeckDsp(id, 0.01);
     }
 
     if (d.softStopGainNode && this.ctx) {
@@ -477,12 +494,31 @@ export class DjAudioEngine {
     if (d.audio.ended) {
       d.audio.currentTime = 0;
     }
-    await d.audio.play();
+    try {
+      await d.audio.play();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   softStop(id: DeckId): void {
     const d = this.decks[id];
     if (d.audio.paused) return;
+
+    if (this.fadeRafId !== null) {
+      cancelAnimationFrame(this.fadeRafId);
+      this.fadeRafId = null;
+      this.isAutoFading = false;
+      this.activeTransitionLabel = null;
+      bpmScheduler.setPausedForFade(false);
+      this.resetDeckDsp("A", 0.03);
+      this.resetDeckDsp("B", 0.03);
+      this.glideTempoToNatural("A", 800);
+      this.glideTempoToNatural("B", 800);
+      this.applyCrossfadeGains();
+      this.emit();
+    }
 
     if (d.softStopTimerId !== null) {
       window.clearTimeout(d.softStopTimerId);
@@ -540,6 +576,7 @@ export class DjAudioEngine {
       this.fadeRafId = null;
       this.isAutoFading = false;
       this.activeTransitionLabel = null;
+      bpmScheduler.setPausedForFade(false);
       this.resetDeckDsp("A", 0.03);
       this.resetDeckDsp("B", 0.03);
       this.glideTempoToNatural("A", 1200);
@@ -584,15 +621,19 @@ export class DjAudioEngine {
     durationMs = 5000,
     onComplete?: (finishedOldDeck: DeckId) => void,
     modeOverride?: MixMode,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (this.fadeRafId !== null) {
       cancelAnimationFrame(this.fadeRafId);
       this.fadeRafId = null;
+      this.resetDeckDsp("A", 0.02);
+      this.resetDeckDsp("B", 0.02);
     }
 
     const oldDeck: DeckId = targetDeck === "A" ? "B" : "A";
     const oldInternals = this.decks[oldDeck];
     const targetInternals = this.decks[targetDeck];
+    if (!targetInternals.snapshot.track) return false;
+
     const startVal = this.crossfade;
     const endVal = targetDeck === "A" ? 0 : 1;
 
@@ -625,9 +666,17 @@ export class DjAudioEngine {
     }
 
     this.cancelTempoGlide(targetDeck);
+    this.cancelTempoGlide(oldDeck);
     targetInternals.audio.playbackRate = plan.initialPlaybackRate;
 
-    await this.play(targetDeck);
+    const started = await this.play(targetDeck, false);
+    if (!started) {
+      targetInternals.audio.playbackRate = 1;
+      this.resetDeckDsp(targetDeck, 0.02);
+      return false;
+    }
+
+    bpmScheduler.setPausedForFade(true);
 
     // Prepare initial DSP state immediately so beat 1 starts cleanly (no bass double-hit!)
     if (this.ctx) {
@@ -703,6 +752,7 @@ export class DjAudioEngine {
         this.fadeRafId = null;
         this.isAutoFading = false;
         this.activeTransitionLabel = null;
+        bpmScheduler.setPausedForFade(false);
         this.crossfade = endVal;
         this.applyCrossfadeGains();
         this.resetDeckDsp(targetDeck, 0.02);
@@ -722,6 +772,7 @@ export class DjAudioEngine {
     };
 
     this.fadeRafId = requestAnimationFrame(step);
+    return true;
   }
 }
 
