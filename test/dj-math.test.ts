@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  computeTransitionDsp,
   computeWaveformAndAutoGain,
   detectAudibleBounds,
   equalPowerGains,
@@ -12,6 +13,7 @@ import {
   isDeckFadedOut,
   parseFilenameMetadata,
   pickAutoNextTrack,
+  planMixTransition,
 } from "@/core/dj-math";
 
 describe("equalPowerGains", () => {
@@ -177,5 +179,83 @@ describe("pickAutoNextTrack", () => {
       random: () => 0,
     });
     expect(picked?.id).toBe("shift");
+  });
+});
+
+describe("Smart Mix planner & DSP curves", () => {
+  test("selects sync-bass-swap for close BPMs with tempo match within ±6%", () => {
+    const plan = planMixTransition({
+      mode: "smart",
+      fromBpm: 124,
+      toBpm: 120,
+      baseDurationMs: 5000,
+    });
+    expect(plan.technique).toBe("sync-bass-swap");
+    expect(plan.initialPlaybackRate).toBeCloseTo(124 / 120, 3);
+    expect(plan.echoDelaySec).toBe(0);
+  });
+
+  test("selects filter-sweep for moderate BPM shift", () => {
+    const plan = planMixTransition({
+      mode: "smart",
+      fromBpm: 120,
+      toBpm: 132,
+      baseDurationMs: 5000,
+    });
+    expect(plan.technique).toBe("filter-sweep");
+    expect(plan.initialPlaybackRate).toBe(1);
+    expect(plan.durationMs).toBe(5000);
+  });
+
+  test("selects BPM-synced echo-out for big BPM clashes", () => {
+    const plan = planMixTransition({
+      mode: "smart",
+      fromBpm: 120,
+      toBpm: 92,
+      baseDurationMs: 5000,
+    });
+    expect(plan.technique).toBe("echo-out");
+    expect(plan.durationMs).toBeLessThanOrEqual(2600);
+    expect(plan.echoDelaySec).toBeCloseTo(0.375, 3); // dotted-eighth at 120 BPM
+  });
+
+  test("respects explicit bass-swap and classic overrides", () => {
+    expect(
+      planMixTransition({ mode: "bass-swap", fromBpm: 90, toBpm: 140, baseDurationMs: 5000 })
+        .technique,
+    ).toBe("bass-swap");
+    expect(
+      planMixTransition({ mode: "classic", fromBpm: 120, toBpm: 122, baseDurationMs: 5000 })
+        .technique,
+    ).toBe("classic");
+  });
+
+  test("bass-swap cuts incoming bass before midpoint and swaps cleanly after", () => {
+    const start = computeTransitionDsp("sync-bass-swap", 0.2);
+    const end = computeTransitionDsp("sync-bass-swap", 0.8);
+    expect(start.outgoing.bassDb).toBeCloseTo(0, 1);
+    expect(start.incoming.bassDb).toBeLessThan(-15);
+    expect(end.outgoing.bassDb).toBeLessThan(-15);
+    expect(end.incoming.bassDb).toBeCloseTo(0, 1);
+  });
+
+  test("echo-out feeds echo early then cuts send so delay decays cleanly", () => {
+    const peak = computeTransitionDsp("echo-out", 0.35);
+    const tail = computeTransitionDsp("echo-out", 0.8);
+    expect(peak.outgoing.echoSend).toBeGreaterThan(0.4);
+    expect(tail.outgoing.echoSend).toBeCloseTo(0, 4);
+    expect(tail.incoming.gain).toBeCloseTo(1, 3);
+    expect(tail.incoming.bassDb).toBe(0);
+  });
+
+  test("detectAudibleBounds snaps Beat-1 cue forward past quiet intro pads", () => {
+    const sr = 1000;
+    const pcm = new Float32Array(sr * 60);
+    // 0..5s quiet pad (0.06), then loud beat hits at 5.0s (0.6)
+    for (let i = 0; i < sr * 5; i++) pcm[i] = 0.06;
+    for (let i = sr * 5; i < sr * 55; i++) pcm[i] = 0.6;
+    const { cueInSec } = detectAudibleBounds(pcm, sr, 2.5);
+    expect(cueInSec).toBeGreaterThanOrEqual(4.9);
+    expect(cueInSec).toBeLessThanOrEqual(5.1);
   });
 });

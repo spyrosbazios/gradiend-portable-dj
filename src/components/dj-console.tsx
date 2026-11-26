@@ -26,7 +26,9 @@ import {
   getLiveDeck,
   isDeckFadedOut,
   pickAutoNextTrack,
+  planMixTransition,
   type DeckId,
+  type MixMode,
 } from "@/core/dj-math";
 import { THEMES, type ThemeName } from "@/core/theme";
 import { djEngine, type TrackItem } from "@/lib/audio-engine";
@@ -78,6 +80,17 @@ interface DjConsoleProps {
 }
 
 const AUTO_FADE_LEAD_BUFFER_SEC = 2.5;
+const MIX_MODE_STORAGE_KEY = "portable-dj:mix-mode";
+
+function readInitialMixMode(): MixMode {
+  try {
+    const raw = localStorage.getItem(MIX_MODE_STORAGE_KEY);
+    if (raw === "smart" || raw === "bass-swap" || raw === "classic") return raw;
+  } catch {
+    // ignore storage errors
+  }
+  return "smart";
+}
 
 export function DjConsole({
   query,
@@ -96,6 +109,16 @@ export function DjConsole({
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [autoPlayEnabled, setAutoPlayEnabled] = useState(true);
   const [fadeSeconds, setFadeSeconds] = useState(5);
+  const [mixMode, setMixMode] = useState<MixMode>(readInitialMixMode);
+
+  useEffect(() => {
+    djEngine.setMixMode(mixMode);
+    try {
+      localStorage.setItem(MIX_MODE_STORAGE_KEY, mixMode);
+    } catch {
+      // ignore storage errors
+    }
+  }, [mixMode]);
   const [playedIds, setPlayedIds] = useState<Set<string>>(() => new Set());
   const [loadFlashA, setLoadFlashA] = useState(0);
   const [loadFlashB, setLoadFlashB] = useState(0);
@@ -216,7 +239,7 @@ export function DjConsole({
   const engineVersion = useSyncExternalStore(
     (cb) => djEngine.subscribe(cb),
     () =>
-      `${djEngine.getDeck("A").currentTime.toFixed(1)}:${djEngine.getDeck("A").isPlaying}:${djEngine.getDeck("A").track?.id ?? ""}:${djEngine.getDeck("A").peaks.length}:${djEngine.getDeck("A").bpm ?? ""}:${djEngine.getDeck("A").waveformLocked}|${djEngine.getDeck("B").currentTime.toFixed(1)}:${djEngine.getDeck("B").isPlaying}:${djEngine.getDeck("B").track?.id ?? ""}:${djEngine.getDeck("B").peaks.length}:${djEngine.getDeck("B").bpm ?? ""}:${djEngine.getDeck("B").waveformLocked}|${djEngine.getCrossfade().toFixed(3)}:${djEngine.getIsAutoFading()}:${djEngine.getMasterVolume().toFixed(2)}`,
+      `${djEngine.getDeck("A").currentTime.toFixed(1)}:${djEngine.getDeck("A").isPlaying}:${djEngine.getDeck("A").track?.id ?? ""}:${djEngine.getDeck("A").peaks.length}:${djEngine.getDeck("A").bpm ?? ""}:${djEngine.getDeck("A").waveformLocked}|${djEngine.getDeck("B").currentTime.toFixed(1)}:${djEngine.getDeck("B").isPlaying}:${djEngine.getDeck("B").track?.id ?? ""}:${djEngine.getDeck("B").peaks.length}:${djEngine.getDeck("B").bpm ?? ""}:${djEngine.getDeck("B").waveformLocked}|${djEngine.getCrossfade().toFixed(3)}:${djEngine.getIsAutoFading()}:${djEngine.getActiveTransitionLabel() ?? ""}:${djEngine.getMasterVolume().toFixed(2)}`,
   );
   void engineVersion;
 
@@ -225,6 +248,7 @@ export function DjConsole({
   const crossfade = djEngine.getCrossfade();
   const masterVolume = djEngine.getMasterVolume();
   const isAutoFading = djEngine.getIsAutoFading();
+  const activeTransitionLabel = djEngine.getActiveTransitionLabel();
 
   const liveDeck = getLiveDeck(crossfade, deckA.isPlaying, deckB.isPlaying);
   const idleDeck = getIdleDeck(crossfade, deckA.isPlaying, deckB.isPlaying);
@@ -248,6 +272,36 @@ export function DjConsole({
   const lastQueuedBpm = queue.length > 0 ? (queue[queue.length - 1]?.track.bpm ?? null) : null;
   const referenceBpm =
     lastQueuedBpm ?? idleSnapshot.bpm ?? liveSnapshot?.bpm ?? deckA.bpm ?? deckB.bpm ?? null;
+
+  const upcomingTransitionPlan = useMemo(() => {
+    if (!idleSnapshot.track) return null;
+    if (!liveSnapshot?.isPlaying) {
+      return planMixTransition({
+        mode: "classic",
+        fromBpm: null,
+        toBpm: idleSnapshot.bpm ?? idleSnapshot.track.bpm,
+        baseDurationMs: fadeSeconds * 1000,
+      });
+    }
+    return planMixTransition({
+      mode: mixMode,
+      fromBpm: liveSnapshot.bpm ?? liveSnapshot.track?.bpm ?? null,
+      toBpm: idleSnapshot.bpm ?? idleSnapshot.track.bpm,
+      baseDurationMs: fadeSeconds * 1000,
+    });
+  }, [
+    idleSnapshot.track,
+    idleSnapshot.bpm,
+    liveSnapshot?.isPlaying,
+    liveSnapshot?.bpm,
+    liveSnapshot?.track?.bpm,
+    mixMode,
+    fadeSeconds,
+  ]);
+
+  const transitionBadgeLabel = isAutoFading
+    ? activeTransitionLabel
+    : (upcomingTransitionPlan?.label ?? null);
 
   const handlePlayDeck = useCallback(
     (id: DeckId) => {
@@ -389,7 +443,10 @@ export function DjConsole({
       liveSnapshot.cueOutSec > 0
         ? Math.min(liveSnapshot.duration, liveSnapshot.cueOutSec)
         : liveSnapshot.duration;
-    const triggerLeadSec = fadeSeconds + AUTO_FADE_LEAD_BUFFER_SEC;
+    const plannedFadeSec = upcomingTransitionPlan
+      ? upcomingTransitionPlan.durationMs / 1000
+      : fadeSeconds;
+    const triggerLeadSec = plannedFadeSec + AUTO_FADE_LEAD_BUFFER_SEC;
     if (effectiveEnd <= triggerLeadSec + 2) return;
 
     const remaining = effectiveEnd - liveSnapshot.currentTime;
@@ -433,12 +490,18 @@ export function DjConsole({
       autoFadeTriggeredForRef.current !== triggerKey
     ) {
       autoFadeTriggeredForRef.current = triggerKey;
-      toast.info(`Auto-fading to ${idleSnapshot.track.title}`);
-      void djEngine.startAutoFade(idleDeck, fadeSeconds * 1000, (oldDeck) => {
-        autoFadeTriggeredForRef.current = null;
-        autoPickTriggeredForRef.current = null;
-        stageNextFromQueue(oldDeck);
-      });
+      const moveLabel = upcomingTransitionPlan ? ` (${upcomingTransitionPlan.label})` : "";
+      toast.info(`Auto-fading to ${idleSnapshot.track.title}${moveLabel}`);
+      void djEngine.startAutoFade(
+        idleDeck,
+        fadeSeconds * 1000,
+        (oldDeck) => {
+          autoFadeTriggeredForRef.current = null;
+          autoPickTriggeredForRef.current = null;
+          stageNextFromQueue(oldDeck);
+        },
+        mixMode,
+      );
     }
   }, [
     autoPlayEnabled,
@@ -453,6 +516,8 @@ export function DjConsole({
     tracks,
     playedIds,
     fadeSeconds,
+    mixMode,
+    upcomingTransitionPlan,
     flashDeck,
     stageNextFromQueue,
   ]);
@@ -645,12 +710,17 @@ export function DjConsole({
       toast.error("Load or queue a song for the next deck first.");
       return;
     }
-    void djEngine.startAutoFade(idleDeck, fadeSeconds * 1000, (oldDeck) => {
-      autoFadeTriggeredForRef.current = null;
-      autoPickTriggeredForRef.current = null;
-      stageNextFromQueue(oldDeck);
-    });
-  }, [idleDeck, idleSnapshot.track, isAutoFading, fadeSeconds, stageNextFromQueue]);
+    void djEngine.startAutoFade(
+      idleDeck,
+      fadeSeconds * 1000,
+      (oldDeck) => {
+        autoFadeTriggeredForRef.current = null;
+        autoPickTriggeredForRef.current = null;
+        stageNextFromQueue(oldDeck);
+      },
+      mixMode,
+    );
+  }, [idleDeck, idleSnapshot.track, isAutoFading, fadeSeconds, mixMode, stageNextFromQueue]);
 
   // Solo Shift tap triggers Fade to Next even while searching (still ignored if combined with another key)
   useEffect(() => {
@@ -880,7 +950,7 @@ export function DjConsole({
       {/* Main Content — Desktop vs Phone Shell */}
       {isDesktop ? (
         <main className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3 md:p-4">
-          <div className="grid shrink-0 grid-cols-1 gap-3 md:grid-cols-[1fr_196px_1fr]">
+          <div className="grid shrink-0 grid-cols-1 gap-3 md:grid-cols-[1fr_228px_1fr]">
             <DeckCard
               deckId="A"
               deck={deckA}
@@ -898,11 +968,14 @@ export function DjConsole({
               crossfade={crossfade}
               isAutoFading={isAutoFading}
               fadeSeconds={fadeSeconds}
+              mixMode={mixMode}
+              transitionLabel={transitionBadgeLabel}
               nextDeck={idleDeck}
               canAutoFade={Boolean(idleSnapshot.track)}
               onCrossfadeChange={(v) => djEngine.setCrossfade(v, true)}
               onAutoFade={handleAutoFade}
               onFadeSecondsChange={setFadeSeconds}
+              onMixModeChange={setMixMode}
             />
             <DeckCard
               deckId="B"
@@ -978,11 +1051,14 @@ export function DjConsole({
                   crossfade={crossfade}
                   isAutoFading={isAutoFading}
                   fadeSeconds={fadeSeconds}
+                  mixMode={mixMode}
+                  transitionLabel={transitionBadgeLabel}
                   nextDeck={idleDeck}
                   canAutoFade={Boolean(idleSnapshot.track)}
                   onCrossfadeChange={(v) => djEngine.setCrossfade(v, true)}
                   onAutoFade={handleAutoFade}
                   onFadeSecondsChange={setFadeSeconds}
+                  onMixModeChange={setMixMode}
                 />
                 <DeckCard
                   deckId="B"

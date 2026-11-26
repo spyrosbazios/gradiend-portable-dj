@@ -152,10 +152,57 @@ export function detectAudibleBounds(
   const detectedOut = Math.min(duration, (lastAudibleBlock + 1) * 0.1);
 
   // For full tracks (>30s), skip at least minIntroSkipSec (or further if silent intro is longer)
-  const cueInSec =
+  const baseCueIn =
     duration > 30
       ? Math.min(duration * 0.2, Math.max(minIntroSkipSec, detectedIn))
       : Math.min(duration * 0.15, detectedIn);
+
+  // Beat-1 transient snap: if the track starts with a quiet pad/fade-in and a clear
+  // percussive hit drops within the next 5s, snap cueIn just before that hit.
+  let cueInSec = baseCueIn;
+  if (duration > 30) {
+    const winSamples = Math.max(1, Math.floor(sampleRate * 0.05)); // 50ms windows
+    const startWin = Math.floor((baseCueIn * sampleRate) / winSamples);
+    const maxSnapSec = Math.min(duration * 0.18, baseCueIn + 5);
+    const endWin = Math.min(
+      Math.floor(channelData.length / winSamples) - 1,
+      Math.floor((maxSnapSec * sampleRate) / winSamples),
+    );
+
+    if (endWin - startWin >= 8) {
+      const rmsValues: number[] = [];
+      for (let w = startWin; w <= endWin; w++) {
+        const s = w * winSamples;
+        const e = Math.min(channelData.length, s + winSamples);
+        const step = Math.max(1, Math.floor((e - s) / 32));
+        let sum = 0;
+        let count = 0;
+        for (let i = s; i < e; i += step) {
+          const v = channelData[i] ?? 0;
+          sum += v * v;
+          count++;
+        }
+        rmsValues.push(count > 0 ? Math.sqrt(sum / count) : 0);
+      }
+
+      const initialRms =
+        ((rmsValues[0] ?? 0) + (rmsValues[1] ?? 0) + (rmsValues[2] ?? 0)) / 3;
+      // Only snap forward if the start is noticeably softer than a full beat drop
+      if (initialRms > 0.005 && initialRms < 0.14) {
+        let runningRms = initialRms;
+        for (let i = 3; i < rmsValues.length; i++) {
+          const curr = rmsValues[i] ?? 0;
+          const prev = rmsValues[i - 1] ?? 0;
+          if (curr >= 0.16 && curr > runningRms * 2.1 && curr - prev > 0.07) {
+            const snapSec = (startWin + i) * 0.05 - 0.02;
+            cueInSec = Math.max(baseCueIn, snapSec);
+            break;
+          }
+          runningRms = runningRms * 0.8 + curr * 0.2;
+        }
+      }
+    }
+  }
 
   // Keep cueOutSec sensible even on very quiet tracks
   const cueOutSec = Math.max(cueInSec + 5, Math.min(duration, detectedOut));
@@ -334,4 +381,228 @@ export function pickAutoNextTrack<T extends BpmTrackCandidate>(
   }
 
   return pickRandom(pool);
+}
+
+export type MixMode = "smart" | "bass-swap" | "classic";
+
+export type TransitionTechnique =
+  | "sync-bass-swap"
+  | "filter-sweep"
+  | "echo-out"
+  | "bass-swap"
+  | "classic";
+
+export interface TransitionPlan {
+  technique: TransitionTechnique;
+  durationMs: number;
+  label: string;
+  /** Starting playbackRate for the incoming deck (1.0 when unsynced). */
+  initialPlaybackRate: number;
+  /** Outgoing BPM-synced echo delay in seconds (0 when unused). */
+  echoDelaySec: number;
+}
+
+export interface DeckTransitionDsp {
+  /** Crossfade dry gain in [0, 1]. */
+  gain: number;
+  /** Low-shelf EQ gain in dB at 200 Hz ([-20, 0]). */
+  bassDb: number;
+  /** High-pass cutoff in Hz ([20, 1400], 20 Hz = transparent). */
+  hpfHz: number;
+  /** Parallel echo send gain ([0, 0.7]). */
+  echoSend: number;
+}
+
+function clamp01(v: number): number {
+  return Math.min(1, Math.max(0, v));
+}
+
+function smoothstep(v: number): number {
+  const x = clamp01(v);
+  return x * x * (3 - 2 * x);
+}
+
+/**
+ * Chooses the optimal transition technique, duration, tempo-sync ratio, and
+ * BPM-synced echo delay based on the user's mix mode and both decks' BPMs.
+ */
+export function planMixTransition(options: {
+  mode: MixMode;
+  fromBpm: number | null;
+  toBpm: number | null;
+  baseDurationMs: number;
+}): TransitionPlan {
+  const { mode, fromBpm, toBpm, baseDurationMs } = options;
+  const safeBase = Math.max(1500, Math.min(12000, baseDurationMs));
+
+  if (mode === "classic") {
+    return {
+      technique: "classic",
+      durationMs: safeBase,
+      label: "Classic Fade",
+      initialPlaybackRate: 1,
+      echoDelaySec: 0,
+    };
+  }
+
+  if (mode === "bass-swap") {
+    return {
+      technique: "bass-swap",
+      durationMs: safeBase,
+      label: "Bass Swap",
+      initialPlaybackRate: 1,
+      echoDelaySec: 0,
+    };
+  }
+
+  const fit = evaluateBpmFit(fromBpm, toBpm);
+
+  if (fit.status === "good" && fromBpm && toBpm) {
+    // Match direct, half-time, or double-time tempo cleanly within ±6%
+    const multipliers = [1, 2, 0.5];
+    let bestMult = 1;
+    let bestPct = Number.POSITIVE_INFINITY;
+    for (const m of multipliers) {
+      const pct = Math.abs(toBpm * m - fromBpm) / fromBpm;
+      if (pct < bestPct) {
+        bestPct = pct;
+        bestMult = m;
+      }
+    }
+    const rawRate = fromBpm / (toBpm * bestMult);
+    const clampedRate = Math.min(1.06, Math.max(0.94, rawRate));
+    const initialPlaybackRate = Math.abs(clampedRate - 1) < 0.004 ? 1 : clampedRate;
+    const durationMs = Math.round(Math.min(9000, Math.max(3500, safeBase * 1.15)));
+
+    return {
+      technique: "sync-bass-swap",
+      durationMs,
+      label:
+        initialPlaybackRate !== 1
+          ? `Sync ${Math.round(fromBpm)} BPM · Bass Swap`
+          : "Bass Swap",
+      initialPlaybackRate,
+      echoDelaySec: 0,
+    };
+  }
+
+  if (fit.status === "clash") {
+    // Dotted-eighth (3/4 beat) delay synced to outgoing tempo — classic club echo-out
+    const echoDelaySec =
+      fromBpm && fromBpm > 0
+        ? Math.min(0.65, Math.max(0.22, (60 / fromBpm) * 0.75))
+        : 0.375;
+
+    return {
+      technique: "echo-out",
+      durationMs: Math.max(2000, Math.min(safeBase, 2600)),
+      label: "Echo Out",
+      initialPlaybackRate: 1,
+      echoDelaySec,
+    };
+  }
+
+  return {
+    technique: "filter-sweep",
+    durationMs: safeBase,
+    label: "Filter Sweep",
+    initialPlaybackRate: 1,
+    echoDelaySec: 0,
+  };
+}
+
+/**
+ * Evaluates per-deck dry gain, low-shelf bass EQ, high-pass filter cutoff, and
+ * parallel echo send at normalized transition progress `p` in [0, 1].
+ */
+export function computeTransitionDsp(
+  technique: TransitionTechnique,
+  progress: number,
+): { outgoing: DeckTransitionDsp; incoming: DeckTransitionDsp } {
+  const p = clamp01(progress);
+
+  if (technique === "classic") {
+    return {
+      outgoing: {
+        gain: Math.cos(p * Math.PI * 0.5),
+        bassDb: 0,
+        hpfHz: 20,
+        echoSend: 0,
+      },
+      incoming: {
+        gain: Math.sin(p * Math.PI * 0.5),
+        bassDb: 0,
+        hpfHz: 20,
+        echoSend: 0,
+      },
+    };
+  }
+
+  if (technique === "bass-swap" || technique === "sync-bass-swap") {
+    // Clean equal-power blend with an automated bass swap across 42% -> 58%
+    const swap = smoothstep((p - 0.42) / 0.16);
+    const tailLift = smoothstep((p - 0.65) / 0.35);
+    return {
+      outgoing: {
+        gain: Math.cos(p * Math.PI * 0.5),
+        bassDb: -20 * swap,
+        hpfHz: 20 + 260 * tailLift,
+        echoSend: 0,
+      },
+      incoming: {
+        gain: Math.sin(p * Math.PI * 0.5),
+        bassDb: -20 * (1 - swap),
+        hpfHz: 20,
+        echoSend: 0,
+      },
+    };
+  }
+
+  if (technique === "filter-sweep") {
+    // Exponential high-pass sweep (20 Hz -> 1100 Hz) lifts outgoing track away cleanly
+    const hpfCurve = smoothstep((p - 0.08) / 0.87);
+    const outHpf = 20 * 55 ** hpfCurve;
+    const outBassCut = -18 * smoothstep(p / 0.55);
+    const inBassOpen = smoothstep((p - 0.25) / 0.3);
+    const inGain = Math.sin(clamp01(p / 0.85) * Math.PI * 0.5);
+
+    return {
+      outgoing: {
+        gain: Math.cos(p * Math.PI * 0.5),
+        bassDb: outBassCut,
+        hpfHz: outHpf,
+        echoSend: 0,
+      },
+      incoming: {
+        gain: inGain,
+        bassDb: -14 * (1 - inBassOpen),
+        hpfHz: 20,
+        echoSend: 0,
+      },
+    };
+  }
+
+  // "echo-out": short club echo wash on outgoing track while incoming drops with full punch
+  const echoRise = Math.sin(clamp01(p / 0.38) * Math.PI * 0.5);
+  const echoCut = 1 - smoothstep((p - 0.4) / 0.16);
+  const echoSend = 0.62 * echoRise * echoCut;
+
+  const outFade = smoothstep((p - 0.12) / 0.52);
+  const outHpf = 20 * 60 ** smoothstep((p - 0.05) / 0.65);
+  const inDrop = smoothstep((p - 0.32) / 0.42);
+
+  return {
+    outgoing: {
+      gain: Math.cos(outFade * Math.PI * 0.5),
+      bassDb: -18 * smoothstep(p / 0.35),
+      hpfHz: outHpf,
+      echoSend,
+    },
+    incoming: {
+      gain: Math.sin(inDrop * Math.PI * 0.5),
+      bassDb: 0,
+      hpfHz: 20,
+      echoSend: 0,
+    },
+  };
 }
