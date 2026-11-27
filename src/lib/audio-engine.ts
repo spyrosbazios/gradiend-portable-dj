@@ -12,7 +12,10 @@ import {
   planMixTransition,
   TRACK_CUES_VERSION,
   type DeckId,
+  type BeatGrid,
+  type CueSpot,
   type FadeBars,
+  type TransitionPlan,
   type MixMode,
   type TrackCues,
 } from "@/core/dj-math";
@@ -97,6 +100,10 @@ export class DjAudioEngine {
   private crossfade = 0; // 0 = full A, 1 = full B
   private masterVolume = 0.85;
   private mixMode: MixMode = "smart";
+  private fadeBars: FadeBars = 16;
+  /** The transition in progress, driven by the timer (Fade to) or by the DJ's fader. */
+  private mix: ActiveMix | null = null;
+  private onMixComplete: ((finishedOldDeck: DeckId) => void) | null = null;
   private activeTransitionLabel: string | null = null;
   private fadeRafId: number | null = null;
   private pendingBeatTimerId: number | null = null;
@@ -107,6 +114,10 @@ export class DjAudioEngine {
   private listeners = new Set<EngineListener>();
   private onDeckEnded: ((id: DeckId) => void) | null = null;
   private rafTickId: number | null = null;
+
+  setOnMixComplete(cb: ((finishedOldDeck: DeckId) => void) | null): void {
+    this.onMixComplete = cb;
+  }
 
   setOnDeckEnded(cb: ((id: DeckId) => void) | null): void {
     this.onDeckEnded = cb;
@@ -346,6 +357,15 @@ export class DjAudioEngine {
     this.emit();
   }
 
+  setFadeBars(bars: FadeBars): void {
+    this.fadeBars = bars;
+  }
+
+  /** True while any mix runs, including one the DJ is driving by hand. */
+  getIsMixing(): boolean {
+    return this.mix !== null || this.isAutoFading;
+  }
+
   getActiveTransitionLabel(): string | null {
     return this.activeTransitionLabel;
   }
@@ -370,8 +390,10 @@ export class DjAudioEngine {
       this.fadeRafId !== null ||
       this.pendingBeatTimerId !== null ||
       this.pendingBeatRafId !== null ||
-      this.isAutoFading;
+      this.isAutoFading ||
+      this.mix !== null;
     if (!wasActive) return;
+    this.mix = null;
 
     this.fadeSeq++;
     this.cancelPendingBeatWait();
@@ -652,6 +674,10 @@ export class DjAudioEngine {
     if (!nextSpot || nextSpot.bar === d.snapshot.selectedEntryBar) return;
 
     d.snapshot = { ...d.snapshot, selectedEntryBar: nextSpot.bar };
+    // A deck pre-running muted follows its flag so a hand mix starts from it.
+    if (!d.audio.paused && !this.isDeckAudible(id) && this.mix === null) {
+      this.cueToSelectedEntry(id);
+    }
     this.emit();
   }
 
@@ -678,31 +704,31 @@ export class DjAudioEngine {
   }
 
   setCrossfade(value: number, fromUser = true): void {
-    if (fromUser && this.isAutoFading) {
-      this.fadeSeq++;
-      this.cancelPendingBeatWait();
-      if (this.fadeRafId !== null) {
-        cancelAnimationFrame(this.fadeRafId);
-        this.fadeRafId = null;
-      }
-      this.isAutoFading = false;
-      this.activeTransitionLabel = null;
-      analysisScheduler.setPausedForFade(false);
-      this.resetDeckDsp("A", 0.03);
-      this.resetDeckDsp("B", 0.03);
-      this.glideTempoToNatural("A", 1200);
-      this.glideTempoToNatural("B", 1200);
-    }
+    const prev = this.crossfade;
     this.crossfade = Math.min(1, Math.max(0, value));
-    this.applyCrossfadeGains();
 
+    if (fromUser) {
+      if (this.mix) {
+        this.driveMixByHand(this.mix);
+        return;
+      }
+      // Touching the fader while Fade to still waits for the bar line cancels it.
+      if (this.isAutoFading) this.abortActiveFade(1200);
+      else if (this.maybeStartHandMix(prev)) return;
+    }
+
+    this.applyCrossfadeGains();
+    this.syncWaveformLocks();
+    this.emit();
+  }
+
+  private syncWaveformLocks(): void {
     for (const id of ["A", "B"] as const) {
       const d = this.decks[id];
       if (d.snapshot.isPlaying) {
         d.snapshot = { ...d.snapshot, waveformLocked: this.isDeckAudible(id) };
       }
     }
-    this.emit();
   }
 
   private applyCrossfadeGains(): void {
@@ -767,35 +793,19 @@ export class DjAudioEngine {
     });
   }
 
-  async startAutoFade(
-    targetDeck: DeckId,
-    fadeBars: FadeBars,
-    onComplete?: (finishedOldDeck: DeckId) => void,
-    modeOverride?: MixMode,
-  ): Promise<boolean> {
-    this.fadeSeq++;
-    const seq = this.fadeSeq;
-    this.cancelPendingBeatWait();
-    if (this.fadeRafId !== null) {
-      cancelAnimationFrame(this.fadeRafId);
-      this.fadeRafId = null;
-      this.resetDeckDsp("A", 0.02);
-      this.resetDeckDsp("B", 0.02);
-    }
-
+  /** Works out how the idle deck should come in over the playing one. */
+  private prepareMix(targetDeck: DeckId): PreparedMix | null {
     const oldDeck: DeckId = targetDeck === "A" ? "B" : "A";
     const oldInternals = this.decks[oldDeck];
     const targetInternals = this.decks[targetDeck];
-    if (!targetInternals.snapshot.track) return false;
-
-    this.ensureAudioGraph();
+    if (!targetInternals.snapshot.track) return null;
 
     const oldPlaying = !oldInternals.audio.paused;
     const oldCues = oldInternals.snapshot.cues;
     const targetCues = targetInternals.snapshot.cues;
     const oldGrid = oldPlaying ? (oldCues?.grid ?? null) : null;
 
-    // Schedule start on the outgoing deck's next bar line (beat 1, <= 1 bar wait)
+    // The mix starts on the outgoing deck's next bar line (beat 1, <= 1 bar away).
     let targetBarSec: number | null = null;
     let waitSec = 0;
     if (oldGrid) {
@@ -805,12 +815,7 @@ export class DjAudioEngine {
       waitSec = Math.max(0, (targetBarSec - outNowSec) / rate);
     }
 
-    const selectedEntry = targetCues
-      ? findCueSpot(
-          targetCues.entries,
-          targetInternals.snapshot.selectedEntryBar ?? targetCues.bestEntryBar,
-        )
-      : null;
+    const selectedEntry = this.selectedEntrySpot(targetDeck);
 
     const exitQuality =
       targetBarSec !== null
@@ -818,7 +823,6 @@ export class DjAudioEngine {
         : oldCues
           ? (getActiveExitSpot(oldCues, oldInternals.audio.currentTime)?.quality ?? null)
           : null;
-    const entryQuality = selectedEntry?.quality ?? null;
 
     const combinedConfidence: "high" | "low" | undefined = !oldPlaying
       ? undefined
@@ -834,7 +838,7 @@ export class DjAudioEngine {
           : undefined;
 
     // If the outgoing deck isn't actually playing, do a clean classic bring-in
-    const effectiveMode: MixMode = !oldPlaying ? "classic" : (modeOverride ?? this.mixMode);
+    const effectiveMode: MixMode = !oldPlaying ? "classic" : this.mixMode;
 
     const fromTempo = mixTempo(
       oldCues,
@@ -853,81 +857,298 @@ export class DjAudioEngine {
         targetCues,
         targetInternals.snapshot.bpm ?? targetInternals.snapshot.track?.bpm ?? null,
       ),
-      fadeBars,
+      fadeBars: this.fadeBars,
       confidence: combinedConfidence,
       exitQuality,
-      entryQuality,
+      entryQuality: selectedEntry?.quality ?? null,
       keyFit: keyFit(oldCues?.key ?? null, targetCues?.key ?? null),
     });
 
-    // Seek incoming deck to its chosen entry phrase cue BEFORE the beat-1 timer fires,
-    // even if it is already running silently: the selected entry is the DJ's choice.
-    const targetDur = targetInternals.snapshot.duration || targetInternals.audio.duration || 0;
-    if (
-      selectedEntry &&
-      selectedEntry.sec >= 0 &&
-      (targetDur === 0 || selectedEntry.sec < targetDur - 2)
-    ) {
-      targetInternals.audio.currentTime = selectedEntry.sec;
-      targetInternals.snapshot = {
-        ...targetInternals.snapshot,
-        currentTime: selectedEntry.sec,
-      };
+    const inGrid = targetCues?.grid ?? null;
+    const lockGrids =
+      plan.tempoMultiplier !== null && oldGrid && inGrid
+        ? { outGrid: oldGrid, inGrid, tempoMultiplier: plan.tempoMultiplier }
+        : null;
+
+    return { oldDeck, targetDeck, plan, targetBarSec, waitSec, selectedEntry, lockGrids };
+  }
+
+  private selectedEntrySpot(id: DeckId): CueSpot | null {
+    const d = this.decks[id];
+    const cues = d.snapshot.cues;
+    return cues ? findCueSpot(cues.entries, d.snapshot.selectedEntryBar ?? cues.bestEntryBar) : null;
+  }
+
+  /** Moves a deck to its flagged entry point (used before it is brought in). */
+  cueToSelectedEntry(id: DeckId, leadSec = 0): void {
+    const d = this.decks[id];
+    const entry = this.selectedEntrySpot(id);
+    if (!entry) return;
+    const dur = d.snapshot.duration || d.audio.duration || 0;
+    if (entry.sec < 0 || (dur > 0 && entry.sec >= dur - 2)) return;
+    const sec = Math.max(0, entry.sec - leadSec);
+    d.audio.currentTime = sec;
+    d.snapshot = { ...d.snapshot, currentTime: sec };
+  }
+
+  /** Sets the incoming deck's tempo and DSP to the plan's starting point (no bass double-hit). */
+  private armIncoming(prepared: PreparedMix): void {
+    const oldInternals = this.decks[prepared.oldDeck];
+    const targetInternals = this.decks[prepared.targetDeck];
+    this.cancelTempoGlide(prepared.targetDeck);
+    this.cancelTempoGlide(prepared.oldDeck);
+    targetInternals.audio.playbackRate = prepared.plan.initialPlaybackRate;
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    if (prepared.plan.echoDelaySec > 0 && oldInternals.echoDelayNode) {
+      oldInternals.echoDelayNode.delayTime.setValueAtTime(prepared.plan.echoDelaySec, now);
     }
+    const initialDsp = computeTransitionDsp(prepared.plan.technique, 0, prepared.plan.fadeBars);
+    if (targetInternals.bassFilterNode) {
+      targetInternals.bassFilterNode.gain.setValueAtTime(initialDsp.incoming.bassDb, now);
+    }
+    if (targetInternals.hpfFilterNode) {
+      targetInternals.hpfFilterNode.frequency.setValueAtTime(initialDsp.incoming.hpfHz, now);
+    }
+    if (targetInternals.echoSendNode) {
+      targetInternals.echoSendNode.gain.setValueAtTime(0, now);
+    }
+  }
+
+  private createMix(seq: number, prepared: PreparedMix, startVal: number, driver: MixDriver): ActiveMix {
+    const startGains = equalPowerGains(startVal);
+    return {
+      seq,
+      driver,
+      oldDeck: prepared.oldDeck,
+      targetDeck: prepared.targetDeck,
+      plan: prepared.plan,
+      lockGrids: prepared.lockGrids,
+      startVal,
+      endVal: prepared.targetDeck === "A" ? 0 : 1,
+      startOutGain: prepared.oldDeck === "A" ? startGains.gainA : startGains.gainB,
+      startInGain: prepared.targetDeck === "A" ? startGains.gainA : startGains.gainB,
+      progress: 0,
+      autoFromProgress: 0,
+      autoStartedAt: 0,
+      lastLockAt: performance.now(),
+    };
+  }
+
+  /**
+   * Starts a hand-driven mix when the DJ pulls the fader from the playing deck toward a
+   * loaded idle deck. Returns true when it took over the fader move.
+   */
+  private maybeStartHandMix(prev: number): boolean {
+    const towardB = this.crossfade > prev;
+    const targetDeck: DeckId = towardB ? "B" : "A";
+    const oldDeck: DeckId = towardB ? "A" : "B";
+    const endVal = towardB ? 1 : 0;
+    if (this.crossfade === prev || Math.abs(endVal - prev) < 0.2) return false;
+    if (this.decks[oldDeck].audio.paused || !this.decks[targetDeck].snapshot.track) return false;
+    // The fader must come from the playing deck's side.
+    if (towardB ? prev > 0.5 : prev < 0.5) return false;
+
+    this.ensureAudioGraph();
+    const prepared = this.prepareMix(targetDeck);
+    if (!prepared) return false;
+
+    this.fadeSeq++;
+    const seq = this.fadeSeq;
+    const targetInternals = this.decks[targetDeck];
+    if (targetInternals.audio.paused) {
+      // Start early by the time left to the next bar line so the entry lands on beat 1.
+      const lead = prepared.lockGrids ? prepared.waitSec * prepared.plan.initialPlaybackRate : 0;
+      this.cueToSelectedEntry(targetDeck, lead);
+    }
+    this.armIncoming(prepared);
+    analysisScheduler.setPausedForFade(true);
+    this.activeTransitionLabel = `Hand mix · ${prepared.plan.label}`;
+    const mix = this.createMix(seq, prepared, prev, "hand");
+    this.mix = mix;
+    this.driveMixByHand(mix);
+    this.ensureMixLoop();
+
+    if (targetInternals.audio.paused) {
+      void this.play(targetDeck, false).then((ok) => {
+        if (!ok && this.mix?.seq === seq) this.abortActiveFade(400);
+      });
+    }
+    return true;
+  }
+
+  /** Progress (0..1) whose eased fader position equals the current crossfade. */
+  private handProgress(mix: ActiveMix): number {
+    const span = mix.endVal - mix.startVal;
+    const frac = span === 0 ? 1 : Math.min(1, Math.max(0, (this.crossfade - mix.startVal) / span));
+    return frac < 0.5 ? Math.sqrt(frac / 2) : 1 - Math.sqrt((1 - frac) / 2);
+  }
+
+  private driveMixByHand(mix: ActiveMix): void {
+    if (mix.driver === "auto") {
+      // Grabbing the fader mid-fade hands the pace to the DJ; the technique carries on.
+      mix.driver = "hand";
+      this.isAutoFading = false;
+      this.activeTransitionLabel = `Hand mix · ${mix.plan.label}`;
+    }
+    const t = this.handProgress(mix);
+    if (t >= 1) {
+      this.finishMix(mix);
+      return;
+    }
+    if (t <= 0 && this.crossfade === mix.startVal && mix.progress > 0) {
+      // Pulled all the way back: drop the mix and leave the incoming deck cued, muted.
+      this.abortActiveFade(800);
+      return;
+    }
+    this.applyMixProgress(mix, t);
+    this.syncWaveformLocks();
+    this.emit();
+  }
+
+  private applyMixProgress(mix: ActiveMix, t: number): void {
+    mix.progress = t;
+    if (!this.ctx) return;
+    const oldInternals = this.decks[mix.oldDeck];
+    const targetInternals = this.decks[mix.targetDeck];
+    const audioNow = this.ctx.currentTime;
+    const { outgoing, incoming } = computeTransitionDsp(mix.plan.technique, t, mix.plan.fadeBars);
+    const outGain = mix.startOutGain * outgoing.gain;
+    const inGain = mix.startInGain + (1 - mix.startInGain) * incoming.gain;
+
+    oldInternals.crossfadeGainNode?.gain.setTargetAtTime(outGain, audioNow, 0.015);
+    oldInternals.bassFilterNode?.gain.setTargetAtTime(outgoing.bassDb, audioNow, 0.02);
+    oldInternals.hpfFilterNode?.frequency.setTargetAtTime(outgoing.hpfHz, audioNow, 0.025);
+    oldInternals.echoSendNode?.gain.setTargetAtTime(outgoing.echoSend, audioNow, 0.015);
+
+    targetInternals.crossfadeGainNode?.gain.setTargetAtTime(inGain, audioNow, 0.015);
+    targetInternals.bassFilterNode?.gain.setTargetAtTime(incoming.bassDb, audioNow, 0.02);
+    targetInternals.hpfFilterNode?.frequency.setTargetAtTime(incoming.hpfHz, audioNow, 0.02);
+    targetInternals.echoSendNode?.gain.setTargetAtTime(incoming.echoSend, audioNow, 0.015);
+  }
+
+  private finishMix(mix: ActiveMix): void {
+    if (this.mix !== mix) return;
+    const oldInternals = this.decks[mix.oldDeck];
+    const targetInternals = this.decks[mix.targetDeck];
+    this.mix = null;
+    if (this.fadeRafId !== null) {
+      cancelAnimationFrame(this.fadeRafId);
+      this.fadeRafId = null;
+    }
+    this.isAutoFading = false;
+    this.activeTransitionLabel = null;
+    analysisScheduler.setPausedForFade(false);
+    this.crossfade = mix.endVal;
+    this.applyCrossfadeGains();
+    this.resetDeckDsp(mix.targetDeck, 0.02);
+    this.resetDeckDsp(mix.oldDeck, 0.04);
+    oldInternals.audio.pause();
+    oldInternals.audio.playbackRate = 1;
+    if (targetInternals.audio.playbackRate !== 1) {
+      this.glideTempoToNatural(mix.targetDeck, 3500);
+    }
+    targetInternals.snapshot = { ...targetInternals.snapshot, waveformLocked: true };
+    this.emit();
+    this.onMixComplete?.(mix.oldDeck);
+  }
+
+  /** One frame loop per mix: the timer drives auto mixes; phase lock runs for both drivers. */
+  private ensureMixLoop(): void {
+    if (this.fadeRafId !== null) return;
+    const step = (now: number) => {
+      const mix = this.mix;
+      if (!mix || mix.seq !== this.fadeSeq) {
+        this.fadeRafId = null;
+        return;
+      }
+      const oldInternals = this.decks[mix.oldDeck];
+      const targetInternals = this.decks[mix.targetDeck];
+
+      if (
+        mix.lockGrids &&
+        now - mix.lastLockAt >= PHASE_LOCK_INTERVAL_MS &&
+        !oldInternals.audio.paused &&
+        !targetInternals.audio.paused
+      ) {
+        mix.lastLockAt = now;
+        targetInternals.audio.playbackRate = phaseLockRate({
+          baseRate: mix.plan.initialPlaybackRate,
+          ...mix.lockGrids,
+          outTimeSec: oldInternals.audio.currentTime,
+          outRate: oldInternals.audio.playbackRate || 1,
+          inTimeSec: targetInternals.audio.currentTime,
+        }).rate;
+      }
+
+      if (mix.driver === "auto") {
+        const t = Math.min(
+          1,
+          mix.autoFromProgress + (now - mix.autoStartedAt) / mix.plan.durationMs,
+        );
+        const eased = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+        this.crossfade = mix.startVal + (mix.endVal - mix.startVal) * eased;
+        this.applyMixProgress(mix, t);
+        this.emit();
+        if (t >= 1) {
+          this.finishMix(mix);
+          return;
+        }
+      }
+      this.fadeRafId = requestAnimationFrame(step);
+    };
+    this.fadeRafId = requestAnimationFrame(step);
+  }
+
+  private runAutoDriver(mix: ActiveMix): void {
+    mix.driver = "auto";
+    mix.autoFromProgress = mix.progress;
+    mix.autoStartedAt = performance.now();
+    this.isAutoFading = true;
+    this.activeTransitionLabel = mix.plan.label;
+    this.emit();
+    this.ensureMixLoop();
+  }
+
+  async startAutoFade(targetDeck: DeckId): Promise<boolean> {
+    // A hand mix toward the same deck: the timer takes over from where the fader is.
+    if (this.mix && this.mix.targetDeck === targetDeck) {
+      this.runAutoDriver(this.mix);
+      return true;
+    }
+
+    this.fadeSeq++;
+    const seq = this.fadeSeq;
+    this.cancelPendingBeatWait();
+    if (this.fadeRafId !== null) {
+      cancelAnimationFrame(this.fadeRafId);
+      this.fadeRafId = null;
+    }
+    if (this.mix) {
+      this.mix = null;
+      this.resetDeckDsp("A", 0.02);
+      this.resetDeckDsp("B", 0.02);
+    }
+
+    this.ensureAudioGraph();
+    const prepared = this.prepareMix(targetDeck);
+    if (!prepared) return false;
+    const oldInternals = this.decks[prepared.oldDeck];
+    const targetInternals = this.decks[targetDeck];
+
+    // Seek the incoming deck to its chosen entry BEFORE the beat-1 wait,
+    // even if it is already running silently: the selected entry is the DJ's choice.
+    this.cueToSelectedEntry(targetDeck);
 
     this.cancelTempoGlide(targetDeck);
-    this.cancelTempoGlide(oldDeck);
+    this.cancelTempoGlide(prepared.oldDeck);
     analysisScheduler.setPausedForFade(true);
     this.isAutoFading = true;
-    this.activeTransitionLabel = plan.label;
+    this.activeTransitionLabel = prepared.plan.label;
     this.emit();
 
-    if (targetBarSec !== null && waitSec > 0.025 && this.ctx) {
-      const targetCtxTime = this.ctx.currentTime + waitSec;
-      const reachedBeat = await this.waitForOutgoingBarLine(
-        seq,
-        oldInternals,
-        targetBarSec,
-        targetCtxTime,
-      );
-      if (!reachedBeat || seq !== this.fadeSeq) {
-        if (seq === this.fadeSeq) {
-          this.isAutoFading = false;
-          this.activeTransitionLabel = null;
-          analysisScheduler.setPausedForFade(false);
-          this.emit();
-        }
-        return false;
-      }
-    }
-
-    if (seq !== this.fadeSeq) return false;
-
-    const startVal = this.crossfade;
-    const endVal = targetDeck === "A" ? 0 : 1;
-
-    targetInternals.audio.playbackRate = plan.initialPlaybackRate;
-
-    // Prepare initial DSP state immediately so beat 1 starts cleanly (no bass double-hit!)
-    if (this.ctx) {
-      const now = this.ctx.currentTime;
-      if (plan.echoDelaySec > 0 && oldInternals.echoDelayNode) {
-        oldInternals.echoDelayNode.delayTime.setValueAtTime(plan.echoDelaySec, now);
-      }
-      const initialDsp = computeTransitionDsp(plan.technique, 0, plan.fadeBars);
-      if (targetInternals.bassFilterNode) {
-        targetInternals.bassFilterNode.gain.setValueAtTime(initialDsp.incoming.bassDb, now);
-      }
-      if (targetInternals.hpfFilterNode) {
-        targetInternals.hpfFilterNode.frequency.setValueAtTime(initialDsp.incoming.hpfHz, now);
-      }
-      if (targetInternals.echoSendNode) {
-        targetInternals.echoSendNode.gain.setValueAtTime(0, now);
-      }
-    }
-
-    const started = await this.play(targetDeck, false);
-    if (!started || seq !== this.fadeSeq) {
+    const { targetBarSec, waitSec } = prepared;
+    const bail = (): false => {
       if (seq === this.fadeSeq) {
         targetInternals.audio.playbackRate = 1;
         this.resetDeckDsp(targetDeck, 0.02);
@@ -937,107 +1158,64 @@ export class DjAudioEngine {
         this.emit();
       }
       return false;
+    };
+
+    if (targetBarSec !== null && waitSec > 0.025 && this.ctx) {
+      const targetCtxTime = this.ctx.currentTime + waitSec;
+      const reachedBeat = await this.waitForOutgoingBarLine(
+        seq,
+        oldInternals,
+        targetBarSec,
+        targetCtxTime,
+      );
+      if (!reachedBeat || seq !== this.fadeSeq) return bail();
     }
+    if (seq !== this.fadeSeq) return false;
+
+    this.armIncoming(prepared);
+    const started = await this.play(targetDeck, false);
+    if (!started || seq !== this.fadeSeq) return bail();
 
     this.lastStartErrorMs =
       targetBarSec !== null
         ? Math.round(Math.abs(oldInternals.audio.currentTime - targetBarSec) * 1000)
         : null;
 
-    const startTime = performance.now();
-    const fadeDurationMs = plan.durationMs;
-    const startGains = equalPowerGains(startVal);
-    const startOutGain = oldDeck === "A" ? startGains.gainA : startGains.gainB;
-    const startInGain = targetDeck === "A" ? startGains.gainA : startGains.gainB;
-
-    // Phase lock keeps the incoming beats on the outgoing beats for the whole blend.
-    const inGrid = targetCues?.grid ?? null;
-    const lockGrids =
-      plan.tempoMultiplier !== null && oldGrid && inGrid
-        ? { outGrid: oldGrid, inGrid, tempoMultiplier: plan.tempoMultiplier }
-        : null;
-    let lastLockAt = startTime;
-
-    const step = (now: number) => {
-      if (seq !== this.fadeSeq) return;
-      const t = Math.min(1, (now - startTime) / fadeDurationMs);
-      const eased = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
-      this.crossfade = startVal + (endVal - startVal) * eased;
-
-      if (lockGrids && now - lastLockAt >= PHASE_LOCK_INTERVAL_MS && !oldInternals.audio.paused) {
-        lastLockAt = now;
-        targetInternals.audio.playbackRate = phaseLockRate({
-          baseRate: plan.initialPlaybackRate,
-          ...lockGrids,
-          outTimeSec: oldInternals.audio.currentTime,
-          outRate: oldInternals.audio.playbackRate || 1,
-          inTimeSec: targetInternals.audio.currentTime,
-        }).rate;
-      }
-
-      if (this.ctx) {
-        const audioNow = this.ctx.currentTime;
-        const { outgoing, incoming } = computeTransitionDsp(plan.technique, t, plan.fadeBars);
-        const outGain = startOutGain * outgoing.gain;
-        const inGain = startInGain + (1 - startInGain) * incoming.gain;
-
-        if (oldInternals.crossfadeGainNode) {
-          oldInternals.crossfadeGainNode.gain.setTargetAtTime(outGain, audioNow, 0.015);
-        }
-        if (oldInternals.bassFilterNode) {
-          oldInternals.bassFilterNode.gain.setTargetAtTime(outgoing.bassDb, audioNow, 0.02);
-        }
-        if (oldInternals.hpfFilterNode) {
-          oldInternals.hpfFilterNode.frequency.setTargetAtTime(outgoing.hpfHz, audioNow, 0.025);
-        }
-        if (oldInternals.echoSendNode) {
-          oldInternals.echoSendNode.gain.setTargetAtTime(outgoing.echoSend, audioNow, 0.015);
-        }
-
-        if (targetInternals.crossfadeGainNode) {
-          targetInternals.crossfadeGainNode.gain.setTargetAtTime(inGain, audioNow, 0.015);
-        }
-        if (targetInternals.bassFilterNode) {
-          targetInternals.bassFilterNode.gain.setTargetAtTime(incoming.bassDb, audioNow, 0.02);
-        }
-        if (targetInternals.hpfFilterNode) {
-          targetInternals.hpfFilterNode.frequency.setTargetAtTime(incoming.hpfHz, audioNow, 0.02);
-        }
-        if (targetInternals.echoSendNode) {
-          targetInternals.echoSendNode.gain.setTargetAtTime(incoming.echoSend, audioNow, 0.015);
-        }
-      }
-
-      this.emit();
-
-      if (t < 1) {
-        this.fadeRafId = requestAnimationFrame(step);
-      } else {
-        this.fadeRafId = null;
-        this.isAutoFading = false;
-        this.activeTransitionLabel = null;
-        analysisScheduler.setPausedForFade(false);
-        this.crossfade = endVal;
-        this.applyCrossfadeGains();
-        this.resetDeckDsp(targetDeck, 0.02);
-        this.resetDeckDsp(oldDeck, 0.04);
-        oldInternals.audio.pause();
-        oldInternals.audio.playbackRate = 1;
-        if (targetInternals.audio.playbackRate !== 1) {
-          this.glideTempoToNatural(targetDeck, 3500);
-        }
-        targetInternals.snapshot = {
-          ...targetInternals.snapshot,
-          waveformLocked: true,
-        };
-        this.emit();
-        onComplete?.(oldDeck);
-      }
-    };
-
-    this.fadeRafId = requestAnimationFrame(step);
+    const mix = this.createMix(seq, prepared, this.crossfade, "auto");
+    this.mix = mix;
+    this.runAutoDriver(mix);
     return true;
   }
+}
+
+type MixDriver = "auto" | "hand";
+
+interface PreparedMix {
+  oldDeck: DeckId;
+  targetDeck: DeckId;
+  plan: TransitionPlan;
+  targetBarSec: number | null;
+  waitSec: number;
+  selectedEntry: CueSpot | null;
+  lockGrids: { outGrid: BeatGrid; inGrid: BeatGrid; tempoMultiplier: number } | null;
+}
+
+interface ActiveMix {
+  seq: number;
+  driver: MixDriver;
+  oldDeck: DeckId;
+  targetDeck: DeckId;
+  plan: TransitionPlan;
+  lockGrids: PreparedMix["lockGrids"];
+  startVal: number;
+  endVal: number;
+  startOutGain: number;
+  startInGain: number;
+  /** Mix progress 0..1 (the DSP curves' input). */
+  progress: number;
+  autoFromProgress: number;
+  autoStartedAt: number;
+  lastLockAt: number;
 }
 
 export const djEngine = new DjAudioEngine();

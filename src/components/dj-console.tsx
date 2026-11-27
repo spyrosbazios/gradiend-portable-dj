@@ -31,6 +31,7 @@ import {
   isDeckFadedOut,
   pickAutoNextTrack,
   planMixTransition,
+  evaluateBpmFit,
   barFadeDurationMs,
   mixTempo,
   type FadeBars,
@@ -91,6 +92,7 @@ interface DjConsoleProps {
 
 const AUTO_MIX_FLAG_LEAD_SEC = 0.5;
 const FALLBACK_AUTO_FADE_LEAD_BUFFER_SEC = 2.5;
+const BPM_MATCH_LIMIT = 40;
 const MIX_MODE_STORAGE_KEY = "portable-dj:mix-mode";
 const trackCollator = new Intl.Collator(undefined, { sensitivity: "base" });
 
@@ -138,6 +140,10 @@ export function DjConsole({
       // ignore storage errors
     }
   }, [mixMode]);
+
+  useEffect(() => {
+    djEngine.setFadeBars(fadeBars);
+  }, [fadeBars]);
   const [playedIds, setPlayedIds] = useState<Set<string>>(() => new Set());
   const [loadFlashA, setLoadFlashA] = useState(0);
   const [loadFlashB, setLoadFlashB] = useState(0);
@@ -277,6 +283,7 @@ export function DjConsole({
   const crossfade = djEngine.getCrossfade();
   const masterVolume = djEngine.getMasterVolume();
   const isAutoFading = djEngine.getIsAutoFading();
+  const isMixing = djEngine.getIsMixing();
   const activeTransitionLabel = djEngine.getActiveTransitionLabel();
 
   const liveDeck = getLiveDeck(crossfade, deckA.isPlaying, deckB.isPlaying);
@@ -376,7 +383,7 @@ export function DjConsole({
   ]);
 
   const transitionBadgeLabel = useMemo(() => {
-    if (isAutoFading) return activeTransitionLabel;
+    if (activeTransitionLabel) return activeTransitionLabel;
     if (!upcomingTransitionPlan) return null;
     if (liveSnapshot?.isPlaying && liveExitSpot) {
       const secsUntilFlag = Math.max(0, liveExitSpot.sec - liveSnapshot.currentTime);
@@ -459,6 +466,9 @@ export function DjConsole({
           djEngine.setCrossfade(id === "A" ? 0 : 1, false);
         }
       }
+
+      // Bringing in the next song: start it from its flagged entry point.
+      if (otherPlaying && !djEngine.getDeck(id).isPlaying) djEngine.cueToSelectedEntry(id);
 
       void djEngine.play(id).then((ok) => {
         if (!ok) {
@@ -592,7 +602,7 @@ export function DjConsole({
       if (inInput) return;
       if (target?.getAttribute("role") === "slider") return;
 
-      if (isAutoFading || !idleSnapshot.track) return;
+      if (isMixing || !idleSnapshot.track) return;
       e.preventDefault();
       const stepHandler = idleDeck === "A" ? handleStepEntryA : handleStepEntryB;
       stepHandler(e.key === "ArrowRight" ? 1 : -1);
@@ -601,7 +611,7 @@ export function DjConsole({
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
-    isAutoFading,
+    isMixing,
     idleDeck,
     idleSnapshot.track,
     handleStepEntryA,
@@ -644,6 +654,16 @@ export function DjConsole({
     },
     [stageNextFromQueue],
   );
+
+  // Every finished mix (Fade to, auto-play or a hand mix on the fader) retires the old deck.
+  useEffect(() => {
+    djEngine.setOnMixComplete((oldDeck) => {
+      autoFadeTriggeredForRef.current = null;
+      autoPickTriggeredForRef.current = null;
+      retireDeck(oldDeck);
+    });
+    return () => djEngine.setOnMixComplete(null);
+  }, [retireDeck]);
 
   // Dead-air recovery: if the live song ever reaches `ended` while Auto-Play is ON
   // (e.g. very short track, manual scrub near end, or toggled on late), immediately
@@ -720,7 +740,7 @@ export function DjConsole({
   // previously-live deck qualifies — an incoming deck that just started is never touched.
   const previousLiveRef = useRef<DeckId | null>(null);
   useEffect(() => {
-    if (!liveDeck || isAutoFading) return;
+    if (!liveDeck || isMixing) return;
     const previous = previousLiveRef.current;
     previousLiveRef.current = liveDeck;
     if (previous && previous !== liveDeck && isDeckFadedOut(previous, crossfade)) {
@@ -729,21 +749,21 @@ export function DjConsole({
       // Fader still partly open on the old deck: remember it until it is fully out.
       previousLiveRef.current = previous;
     }
-  }, [liveDeck, isAutoFading, crossfade, retireDeck]);
+  }, [liveDeck, isMixing, crossfade, retireDeck]);
 
   // Auto-stage first queued track into the idle deck if idle deck is empty
   useEffect(() => {
-    if (!idleSnapshot.track && queue.length > 0 && !isAutoFading) {
+    if (!idleSnapshot.track && queue.length > 0 && !isMixing) {
       stageNextFromQueue(idleDeck);
     }
-  }, [idleSnapshot.track, queue.length, idleDeck, isAutoFading, stageNextFromQueue]);
+  }, [idleSnapshot.track, queue.length, idleDeck, isMixing, stageNextFromQueue]);
 
   // Auto-Play safety net:
   // 1) If queue & idle deck are empty ahead of the live deck's mix-out flag, auto-pick
   //    a random unplayed cached track with a close BPM and stage it on the idle deck.
   // 2) Trigger auto-mix at `exitFlag.sec - lead` so startAutoFade lands cleanly on beat 1.
   useEffect(() => {
-    if (!autoPlayEnabled || isAutoFading || !liveDeck || !liveSnapshot?.track) return;
+    if (!autoPlayEnabled || isMixing || !liveDeck || !liveSnapshot?.track) return;
 
     const plannedFadeSec = upcomingTransitionPlan
       ? upcomingTransitionPlan.durationMs / 1000
@@ -808,16 +828,7 @@ export function DjConsole({
       const moveLabel = upcomingTransitionPlan ? ` (${upcomingTransitionPlan.label})` : "";
       toast.info(`Auto-fading to ${targetTitle}${moveLabel}`);
       void djEngine
-        .startAutoFade(
-          idleDeck,
-          fadeBars,
-          (oldDeck) => {
-            autoFadeTriggeredForRef.current = null;
-            autoPickTriggeredForRef.current = null;
-            retireDeck(oldDeck);
-          },
-          mixMode,
-        )
+        .startAutoFade(idleDeck)
         .then((ok) => {
           if (!ok) {
             autoFadeTriggeredForRef.current = null;
@@ -828,7 +839,7 @@ export function DjConsole({
     }
   }, [
     autoPlayEnabled,
-    isAutoFading,
+    isMixing,
     liveDeck,
     liveSnapshot,
     liveExitSpot,
@@ -941,7 +952,7 @@ export function DjConsole({
 
   const handleLoadNext = useCallback(
     (track: TrackItem, force = false) => {
-      if (isAutoFading) {
+      if (isMixing) {
         toast.info("Wait for the current fade to finish before loading a deck.");
         return;
       }
@@ -979,7 +990,7 @@ export function DjConsole({
       flashDeck(target);
       toast.success(`Loaded “${track.title}” onto Deck ${target} (Up Next)`);
     },
-    [deckA.track, deckB.track, flashDeck, idleDeck, isAutoFading, liveDeck, playedIds],
+    [deckA.track, deckB.track, flashDeck, idleDeck, isMixing, liveDeck, playedIds],
   );
 
   const handleDropTrack = useCallback(
@@ -1039,14 +1050,14 @@ export function DjConsole({
         return;
       }
 
-      if (!deckA.track && !deckB.track && !isAutoFading) {
+      if (!deckA.track && !deckB.track && !isMixing) {
         djEngine.setCrossfade(0, false);
         void djEngine.loadTrack("A", track);
         flashDeck("A");
         toast.success(`Loaded “${track.title}” onto Deck A`);
         return;
       }
-      if (!idleSnapshot.track && !isAutoFading) {
+      if (!idleSnapshot.track && !isMixing) {
         void djEngine.loadTrack(idleDeck, track);
         flashDeck(idleDeck);
         toast.success(`Staged “${track.title}” on Deck ${idleDeck} (Up Next)`);
@@ -1064,7 +1075,7 @@ export function DjConsole({
       flashDeck,
       idleDeck,
       idleSnapshot.track,
-      isAutoFading,
+      isMixing,
       liveDeck,
       liveSnapshot?.track?.id,
       playedIds,
@@ -1079,22 +1090,13 @@ export function DjConsole({
     }
     const targetTitle = idleSnapshot.track.title;
     void djEngine
-      .startAutoFade(
-        idleDeck,
-        fadeBars,
-        (oldDeck) => {
-          autoFadeTriggeredForRef.current = null;
-          autoPickTriggeredForRef.current = null;
-          retireDeck(oldDeck);
-        },
-        mixMode,
-      )
+      .startAutoFade(idleDeck)
       .then((ok) => {
         if (!ok) {
           toast.error(`Could not play “${targetTitle}”. The audio file may be unreadable.`);
         }
       });
-  }, [idleDeck, idleSnapshot.track, isAutoFading, fadeBars, mixMode, retireDeck]);
+  }, [idleDeck, idleSnapshot.track, isAutoFading]);
 
   // Solo Shift tap triggers Fade to Next even while searching (still ignored if combined with another key)
   useEffect(() => {
@@ -1144,7 +1146,7 @@ export function DjConsole({
 
   const handleLoadFromQueue = useCallback(
     (index: number) => {
-      if (isAutoFading) {
+      if (isMixing) {
         toast.info("Wait for the current fade to finish before loading a deck.");
         return;
       }
@@ -1171,7 +1173,7 @@ export function DjConsole({
       flashDeck(targetDeck);
       toast.success(`Loaded “${targetEntry.track.title}” onto Deck ${targetDeck}`);
     },
-    [queue, idleDeck, isAutoFading, liveDeck, idleSnapshot.track, flashDeck],
+    [queue, idleDeck, isMixing, liveDeck, idleSnapshot.track, flashDeck],
   );
 
   const handleMoveQueue = useCallback((from: number, to: number) => {
@@ -1209,6 +1211,19 @@ export function DjConsole({
     () => searchTracks(sortedTracks, query),
     [sortedTracks, query],
   );
+
+  // Tracks whose cached BPM mixes smoothly into the reference, closest first.
+  const bpmMatchTracks = useMemo(() => {
+    if (referenceBpm === null) return [];
+    const deckIds = new Set([deckA.track?.id, deckB.track?.id]);
+    return tracks
+      .filter((t) => t.bpm !== null && !deckIds.has(t.id) && !playedIds.has(t.id))
+      .map((t) => ({ track: t, fit: evaluateBpmFit(referenceBpm, t.bpm) }))
+      .filter((m) => m.fit.status === "good")
+      .sort((a, b) => Math.abs(a.fit.diffBpm) - Math.abs(b.fit.diffBpm))
+      .slice(0, BPM_MATCH_LIMIT)
+      .map((m) => m.track);
+  }, [tracks, referenceBpm, deckA.track?.id, deckB.track?.id, playedIds]);
 
   const ThemeIcon = theme === "light" ? Sun : theme === "oled" ? Monitor : Moon;
 
@@ -1386,6 +1401,7 @@ export function DjConsole({
           <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 md:grid-cols-[1.65fr_1fr]">
             <LibraryPanel
               tracks={filteredTracks}
+              matchTracks={bpmMatchTracks}
               totalCount={tracks.length}
               query={query}
               sortMode={sortMode}
@@ -1481,6 +1497,7 @@ export function DjConsole({
             {mobileTab === "library" && (
               <LibraryPanel
                 tracks={filteredTracks}
+                matchTracks={bpmMatchTracks}
                 totalCount={tracks.length}
                 query={query}
                 sortMode={sortMode}

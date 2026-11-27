@@ -12,6 +12,7 @@ import {
   Play,
   RotateCcw,
   Search,
+  Waves,
   X,
 } from "lucide-react";
 import { evaluateBpmFit, type DeckId } from "@/core/dj-math";
@@ -32,6 +33,7 @@ export type SortMode = "title" | "artist" | "filename";
 
 interface LibraryPanelProps {
   tracks: TrackItem[];
+  matchTracks: TrackItem[];
   totalCount: number;
   query: string;
   sortMode: SortMode;
@@ -62,6 +64,7 @@ const SORT_LABELS: Record<SortMode, string> = {
 
 export const LibraryPanel = memo(function LibraryPanel({
   tracks,
+  matchTracks,
   totalCount,
   query,
   sortMode,
@@ -379,7 +382,7 @@ export const LibraryPanel = memo(function LibraryPanel({
       ) : (
         <div
           ref={scrollRef}
-          className="min-h-0 flex-1 overflow-y-auto px-2 py-1.5 pb-[calc(var(--under-tabs,0px)+1rem)]"
+          className="min-h-0 flex-[3] overflow-y-auto px-2 py-1.5"
         >
           <div
             style={{
@@ -634,6 +637,95 @@ export const LibraryPanel = memo(function LibraryPanel({
           </div>
         </div>
       )}
+
+      {totalCount > 0 && (
+        <BpmMatchList
+          tracks={matchTracks}
+          referenceBpm={referenceBpm}
+          onLoadNext={onLoadNext}
+          onAddToQueue={onAddToQueue}
+        />
+      )}
     </section>
+  );
+});
+
+interface BpmMatchListProps {
+  tracks: TrackItem[];
+  referenceBpm: number | null;
+  onLoadNext: (track: TrackItem) => void;
+  onAddToQueue: (track: TrackItem) => void;
+}
+
+/** Second library row: analysed tracks whose BPM mixes smoothly into the reference. */
+const BpmMatchList = memo(function BpmMatchList({
+  tracks,
+  referenceBpm,
+  onLoadNext,
+  onAddToQueue,
+}: BpmMatchListProps) {
+  return (
+    <div className="flex min-h-0 flex-[2] flex-col border-t border-line">
+      <div className="flex items-center gap-1.5 px-3 py-1.5">
+        <Waves className="size-3.5 text-up" />
+        <h3 className="text-xs font-bold tracking-wider text-dim">BPM MATCH</h3>
+        <span className="font-mono text-xs text-faint tabular-nums">
+          {referenceBpm !== null ? `${Math.round(referenceBpm)} BPM · ${tracks.length}` : ""}
+        </span>
+      </div>
+      {tracks.length === 0 ? (
+        <p className="px-3 pb-[calc(var(--under-tabs,0px)+0.75rem)] text-xs text-faint">
+          {referenceBpm === null
+            ? "Load a track to see BPM matches."
+            : "No analysed tracks match yet — matches appear as BPMs are cached."}
+        </p>
+      ) : (
+        <ul className="min-h-0 flex-1 overflow-y-auto px-2 pb-[calc(var(--under-tabs,0px)+1rem)]">
+          {tracks.map((track) => {
+            const fit = evaluateBpmFit(referenceBpm, track.bpm);
+            return (
+              <li
+                key={track.id}
+                draggable
+                onDragStart={(e) => {
+                  e.dataTransfer.effectAllowed = "copy";
+                  e.dataTransfer.setData(TRACK_DRAG_MIME, track.id);
+                  e.dataTransfer.setData("text/plain", `${track.artist} - ${track.title}`);
+                  setTrackDragImage(e, track.title);
+                }}
+                className="flex cursor-grab items-center gap-2 rounded-lg px-2.5 py-1 hover:bg-raised active:cursor-grabbing"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium text-fg">{track.title}</div>
+                  <div className="truncate text-xs text-dim">{track.artist}</div>
+                </div>
+                <span className="shrink-0 rounded bg-up-soft px-1.5 py-0.5 font-mono text-[10px] font-semibold text-up tabular-nums">
+                  {track.bpm} · {fit.diffBpm > 0 ? "+" : ""}
+                  {fit.diffBpm}
+                </span>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  onClick={() => onAddToQueue(track)}
+                  title="Add to Up Next"
+                  aria-label={`Queue ${track.title}`}
+                >
+                  <ListPlus className="size-3.5" />
+                </Button>
+                <Button
+                  size="xs"
+                  variant="secondary"
+                  onClick={() => onLoadNext(track)}
+                  title="Load onto the next deck"
+                  aria-label={`Load ${track.title}`}
+                >
+                  <Play className="size-3" />
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 });
