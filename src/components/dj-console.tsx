@@ -639,10 +639,10 @@ export function DjConsole({
     handleStepEntryB,
   ]);
 
-  // Mark tracks as "Played" after 30s of live playback
+  // Mark a track "Played" as soon as it plays on air, so BPM MATCH and auto-pick never offer it again
   useEffect(() => {
     if (!liveSnapshot?.track || !liveSnapshot.isPlaying) return;
-    if (liveSnapshot.currentTime >= 30 && !playedIds.has(liveSnapshot.track.id)) {
+    if (!playedIds.has(liveSnapshot.track.id)) {
       const id = liveSnapshot.track.id;
       setPlayedIds((prev) => {
         const next = new Set(prev);
@@ -650,7 +650,7 @@ export function DjConsole({
         return next;
       });
     }
-  }, [liveSnapshot?.track, liveSnapshot?.isPlaying, liveSnapshot?.currentTime, playedIds]);
+  }, [liveSnapshot?.track, liveSnapshot?.isPlaying, playedIds]);
 
   // Pop next song from queue into a freshly freed deck
   const stageNextFromQueue = useCallback(
