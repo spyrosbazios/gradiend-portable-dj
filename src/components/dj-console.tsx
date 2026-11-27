@@ -759,18 +759,21 @@ export function DjConsole({
   // Once the mix lands on the other deck, the deck that was live before is spent: eject it
   // (playing or stopped) so the fader can never bring the previous song back. Only the
   // previously-live deck qualifies — an incoming deck that just started is never touched.
-  const previousLiveRef = useRef<DeckId | null>(null);
+  // The ref keeps the *song* that was live, not just the deck: a finished mix already retires
+  // the old deck and stages the queue head onto it, and that fresh song must not be ejected.
+  const previousLiveRef = useRef<{ deck: DeckId; trackId: string } | null>(null);
+  const liveTrackId = liveSnapshot?.track?.id ?? null;
   useEffect(() => {
-    if (!liveDeck || isMixing) return;
+    if (!liveDeck || !liveTrackId || isMixing) return;
     const previous = previousLiveRef.current;
-    previousLiveRef.current = liveDeck;
-    if (previous && previous !== liveDeck && isDeckFadedOut(previous, crossfade)) {
-      if (djEngine.getDeck(previous).track) retireDeck(previous);
-    } else if (previous && previous !== liveDeck) {
+    previousLiveRef.current = { deck: liveDeck, trackId: liveTrackId };
+    if (previous && previous.deck !== liveDeck && isDeckFadedOut(previous.deck, crossfade)) {
+      if (djEngine.getDeck(previous.deck).track?.id === previous.trackId) retireDeck(previous.deck);
+    } else if (previous && previous.deck !== liveDeck) {
       // Fader still partly open on the old deck: remember it until it is fully out.
       previousLiveRef.current = previous;
     }
-  }, [liveDeck, isMixing, crossfade, retireDeck]);
+  }, [liveDeck, liveTrackId, isMixing, crossfade, retireDeck]);
 
   // Auto-stage first queued track into the idle deck if idle deck is empty
   useEffect(() => {
