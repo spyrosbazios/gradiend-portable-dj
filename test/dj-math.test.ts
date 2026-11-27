@@ -1,3 +1,4 @@
+import { detectKey, keyFit } from "@/core/key-detect";
 import { describe, expect, test } from "bun:test";
 import {
   analyzeTrackCues,
@@ -141,14 +142,15 @@ describe("BPM detection & transition fit", () => {
 describe("pickAutoNextTrack", () => {
   test("prefers unplayed cached tracks with close BPM", () => {
     const tracks = [
-      { id: "live", bpm: 120 },
-      { id: "played-good", bpm: 122 },
-      { id: "far", bpm: 165 },
-      { id: "close", bpm: 124 },
-      { id: "uncached", bpm: null },
+      { id: "live", bpm: 120, cues: null },
+      { id: "played-good", bpm: 122, cues: null },
+      { id: "far", bpm: 165, cues: null },
+      { id: "close", bpm: 124, cues: null },
+      { id: "uncached", bpm: null, cues: null },
     ];
     const picked = pickAutoNextTrack(tracks, {
       referenceBpm: 120,
+      referenceKey: null,
       playedIds: new Set(["played-good"]),
       excludeIds: new Set(["live"]),
       random: () => 0,
@@ -158,12 +160,13 @@ describe("pickAutoNextTrack", () => {
 
   test("falls back to shift-range BPM when no exact/smooth match exists", () => {
     const tracks = [
-      { id: "live", bpm: 120 },
-      { id: "shift", bpm: 132 },
-      { id: "clash", bpm: 165 },
+      { id: "live", bpm: 120, cues: null },
+      { id: "shift", bpm: 132, cues: null },
+      { id: "clash", bpm: 165, cues: null },
     ];
     const picked = pickAutoNextTrack(tracks, {
       referenceBpm: 120,
+      referenceKey: null,
       playedIds: new Set(),
       excludeIds: new Set(["live"]),
       random: () => 0,
@@ -279,6 +282,80 @@ describe("Smart Mix planner & DSP curves", () => {
     expect(tail.outgoing.echoSend).toBeCloseTo(0, 4);
     expect(tail.incoming.gain).toBeCloseTo(1, 3);
     expect(tail.incoming.bassDb).toBe(0);
+  });
+});
+
+describe("Key matching", () => {
+  const sr = 22050;
+  // A sustained triad over a root note: a strong, unambiguous tonal centre.
+  const chord = (rootHz: number, thirdRatio: number) => {
+    const pcm = new Float32Array(sr * 20);
+    const partials = [rootHz / 2, rootHz, rootHz * thirdRatio, rootHz * 1.5, rootHz * 2];
+    for (let i = 0; i < pcm.length; i++) {
+      let v = 0;
+      for (const f of partials) v += Math.sin((2 * Math.PI * f * i) / sr);
+      pcm[i] = 0.15 * v;
+    }
+    return pcm;
+  };
+
+  test("detects A minor and C major triads with their Camelot codes", () => {
+    expect(detectKey(chord(440, 1.1892), sr)?.camelot).toBe("8A");
+    expect(detectKey(chord(261.63, 1.2599), sr)?.camelot).toBe("8B");
+  });
+
+  test("returns null for silence and very short input", () => {
+    expect(detectKey(new Float32Array(sr * 20), sr)).toBeNull();
+    expect(detectKey(new Float32Array(1000), sr)).toBeNull();
+  });
+
+  const key = (camelot: string, strength = 0.1) => ({
+    tonic: 0,
+    mode: camelot.endsWith("B") ? ("major" as const) : ("minor" as const),
+    camelot,
+    strength,
+  });
+
+  test("Camelot neighbours and relative keys match; distant keys clash", () => {
+    expect(keyFit(key("8A"), key("8A"))).toBe("match");
+    expect(keyFit(key("8A"), key("9A"))).toBe("match");
+    expect(keyFit(key("12A"), key("1A"))).toBe("match");
+    expect(keyFit(key("8A"), key("8B"))).toBe("match");
+    expect(keyFit(key("8A"), key("10A"))).toBe("clash");
+    expect(keyFit(key("8A"), key("9B"))).toBe("clash");
+    expect(keyFit(key("8A"), null)).toBe("unknown");
+    expect(keyFit(key("8A", 0.001), key("8A"))).toBe("unknown");
+  });
+
+  test("a key clash shortens a synced blend to 4 bars", () => {
+    const plan = planMixTransition({
+      mode: "smart",
+      fromBpm: 124,
+      toBpm: 124,
+      fadeBars: 16,
+      confidence: "high",
+      exitQuality: "good",
+      entryQuality: "good",
+      keyFit: "clash",
+    });
+    expect(plan.technique).toBe("sync-bass-swap");
+    expect(plan.fadeBars).toBe(4);
+  });
+
+  test("auto-pick prefers a close-BPM track in a compatible key", () => {
+    const tracks = [
+      { id: "clashing", bpm: 124, cues: { key: key("3B") } },
+      { id: "in-key", bpm: 123, cues: { key: key("9A") } },
+      { id: "unknown", bpm: 124, cues: null },
+    ];
+    const picked = pickAutoNextTrack(tracks, {
+      referenceBpm: 124,
+      referenceKey: key("8A"),
+      playedIds: new Set(),
+      excludeIds: new Set(),
+      random: () => 0,
+    });
+    expect(picked?.id).toBe("in-key");
   });
 });
 
@@ -603,6 +680,7 @@ describe("Transition cue analysis (phrase features, ratings, fallback)", () => {
   test("advances active exit flag to next good exit when playhead passes suggested flag", () => {
     const cues = {
       version: TRACK_CUES_VERSION,
+      key: null,
       grid: { bpm: 120, firstDownbeatSec: 0 },
       entries: [],
       exits: [

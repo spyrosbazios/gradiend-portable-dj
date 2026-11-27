@@ -1,3 +1,5 @@
+import { detectKey, keyFit, type KeyFit, type MusicalKey } from "@/core/key-detect";
+
 export type DeckId = "A" | "B";
 
 const AUDIO_EXT_RE = /\.(mp3|m4a|wav|flac|ogg|aac|opus|webm)$/i;
@@ -121,7 +123,7 @@ export interface CueSpot {
   reason: string;
 }
 
-export const TRACK_CUES_VERSION = 2 as const;
+export const TRACK_CUES_VERSION = 3 as const;
 
 export interface TrackCues {
   version: typeof TRACK_CUES_VERSION;
@@ -131,6 +133,8 @@ export interface TrackCues {
   bestEntryBar: number;
   bestExitBar: number;
   confidence: "high" | "low";
+  /** Detected musical key, for harmonic (Camelot) compatibility. */
+  key: MusicalKey | null;
 }
 
 export interface AudioEnvelopes {
@@ -720,7 +724,11 @@ function averageRange(bars: BarFeature[], start: number, end: number): BarFeatur
   return { energy: energy / count, low: low / count, mid: mid / count };
 }
 
-function buildFallbackCues(audibleStartSec: number, audibleEndSec: number): TrackCues {
+function buildFallbackCues(
+  audibleStartSec: number,
+  audibleEndSec: number,
+  key: MusicalKey | null,
+): TrackCues {
   const safeStart = Math.max(0, Math.round(audibleStartSec * 100) / 100);
   const span = Math.max(0, audibleEndSec - safeStart);
   const tailLead = Math.min(12, Math.max(2, span * 0.2));
@@ -728,6 +736,7 @@ function buildFallbackCues(audibleStartSec: number, audibleEndSec: number): Trac
 
   return {
     version: TRACK_CUES_VERSION,
+    key,
     grid: null,
     entries: [
       {
@@ -755,7 +764,10 @@ function buildFallbackCues(audibleStartSec: number, audibleEndSec: number): Trac
  * Computes per-bar normalized features, 8-bar phrase starts, entry/exit ratings,
  * and fallback cues from precomputed multi-band envelopes.
  */
-export function analyzeTrackCuesFromEnvelopes(envelopes: AudioEnvelopes): {
+export function analyzeTrackCuesFromEnvelopes(
+  envelopes: AudioEnvelopes,
+  key: MusicalKey | null,
+): {
   bpm: number | null;
   cues: TrackCues;
 } {
@@ -766,7 +778,7 @@ export function analyzeTrackCuesFromEnvelopes(envelopes: AudioEnvelopes): {
   if (!gridRes.grid) {
     return {
       bpm: gridRes.bpm,
-      cues: buildFallbackCues(audible.startSec, audible.endSec),
+      cues: buildFallbackCues(audible.startSec, audible.endSec, key),
     };
   }
 
@@ -777,7 +789,7 @@ export function analyzeTrackCuesFromEnvelopes(envelopes: AudioEnvelopes): {
   if (numBars < 8) {
     return {
       bpm: gridRes.bpm,
-      cues: buildFallbackCues(audible.startSec, audible.endSec),
+      cues: buildFallbackCues(audible.startSec, audible.endSec, key),
     };
   }
 
@@ -992,7 +1004,7 @@ export function analyzeTrackCuesFromEnvelopes(envelopes: AudioEnvelopes): {
   if (entries.length === 0 || exits.length === 0) {
     return {
       bpm: gridRes.bpm,
-      cues: buildFallbackCues(audible.startSec, audible.endSec),
+      cues: buildFallbackCues(audible.startSec, audible.endSec, key),
     };
   }
 
@@ -1006,6 +1018,7 @@ export function analyzeTrackCuesFromEnvelopes(envelopes: AudioEnvelopes): {
       bestEntryBar,
       bestExitBar,
       confidence,
+      key,
     },
   };
 }
@@ -1019,7 +1032,7 @@ export function analyzeTrackCues(
   sampleRate: number,
 ): { bpm: number | null; cues: TrackCues } {
   const envelopes = computeBandEnvelopes(channelData, sampleRate);
-  return analyzeTrackCuesFromEnvelopes(envelopes);
+  return analyzeTrackCuesFromEnvelopes(envelopes, detectKey(channelData, sampleRate));
 }
 
 export function findCueSpot(spots: CueSpot[], bar: number | null): CueSpot | null {
@@ -1169,6 +1182,7 @@ export function evaluateBpmFit(prevBpm: number | null, nextBpm: number | null): 
 export interface BpmTrackCandidate {
   id: string;
   bpm: number | null;
+  cues: { key: MusicalKey | null } | null;
 }
 
 /**
@@ -1179,12 +1193,14 @@ export function pickAutoNextTrack<T extends BpmTrackCandidate>(
   tracks: T[],
   options: {
     referenceBpm: number | null;
+    /** Key of the track being mixed out of; compatible keys are preferred. */
+    referenceKey: MusicalKey | null;
     playedIds: Set<string>;
     excludeIds: Set<string>;
     random?: () => number;
   },
 ): T | null {
-  const { referenceBpm, playedIds, excludeIds, random = Math.random } = options;
+  const { referenceBpm, referenceKey, playedIds, excludeIds, random = Math.random } = options;
   const pickRandom = (arr: T[]): T | null => {
     if (arr.length === 0) return null;
     const idx = Math.floor(random() * arr.length);
@@ -1200,6 +1216,8 @@ export function pickAutoNextTrack<T extends BpmTrackCandidate>(
   if (referenceBpm !== null && referenceBpm > 0) {
     const withBpm = pool.filter((t) => t.bpm !== null);
     const good = withBpm.filter((t) => evaluateBpmFit(referenceBpm, t.bpm).status === "good");
+    const goodInKey = good.filter((t) => keyFit(referenceKey, t.cues?.key ?? null) === "match");
+    if (goodInKey.length > 0) return pickRandom(goodInKey);
     if (good.length > 0) return pickRandom(good);
 
     const ok = withBpm.filter((t) => evaluateBpmFit(referenceBpm, t.bpm).status === "ok");
@@ -1276,7 +1294,8 @@ export function barFadeDurationMs(fromBpm: number | null, bars: number): number 
  * Chooses the transition technique, bar-aligned length, tempo-sync ratio and echo delay.
  *
  * Smart mode always blends over whole bars when it can: the DJ's chosen length for a
- * clean pair, a short 4-bar bass swap when a spot is risky, and an echo-out only when the
+ * clean pair, a short 4-bar bass swap when a spot is risky or the keys clash, and an
+ * echo-out only when the
  * tempos clash or there is no trustworthy beat grid.
  */
 export function planMixTransition(options: {
@@ -1290,9 +1309,20 @@ export function planMixTransition(options: {
   confidence?: "high" | "low";
   exitQuality?: SpotQuality | null;
   entryQuality?: SpotQuality | null;
+  /** Harmonic fit of the two keys; a clash keeps the overlap short. */
+  keyFit?: KeyFit;
 }): TransitionPlan {
-  const { mode, fromBpm, toBpm, fadeBars, barsAvailable, confidence, exitQuality, entryQuality } =
-    options;
+  const {
+    mode,
+    fromBpm,
+    toBpm,
+    fadeBars,
+    barsAvailable,
+    confidence,
+    exitQuality,
+    entryQuality,
+    keyFit: harmonicFit,
+  } = options;
   const bars = (wanted: number) => {
     // Keep an even bar count so the bass swap lands on the middle bar line.
     const cap = barsAvailable === undefined ? wanted : Math.floor(barsAvailable / 2) * 2;
@@ -1336,7 +1366,7 @@ export function planMixTransition(options: {
     };
   }
 
-  const risky = exitQuality === "risky" || entryQuality === "risky";
+  const risky = exitQuality === "risky" || entryQuality === "risky" || harmonicFit === "clash";
 
   if (sync) {
     return {

@@ -16,6 +16,7 @@ import {
   type MixMode,
   type TrackCues,
 } from "@/core/dj-math";
+import { keyFit } from "@/core/key-detect";
 import { analysisScheduler } from "@/lib/analysis-scheduler";
 
 export interface TrackItem {
@@ -851,6 +852,7 @@ export class DjAudioEngine {
       confidence: combinedConfidence,
       exitQuality,
       entryQuality,
+      keyFit: keyFit(oldCues?.key ?? null, targetCues?.key ?? null),
     });
 
     // Seek incoming deck to its chosen entry phrase cue BEFORE the beat-1 timer fires,

@@ -39,6 +39,7 @@ import {
   type SpotQuality,
   type TrackCues,
 } from "@/core/dj-math";
+import { keyFit } from "@/core/key-detect";
 import { THEMES, type ThemeName } from "@/core/theme";
 import { djEngine, type TrackItem } from "@/lib/audio-engine";
 import { analysisScheduler } from "@/lib/analysis-scheduler";
@@ -301,6 +302,9 @@ export function DjConsole({
   const referenceBpm =
     lastQueuedBpm ?? idleSnapshot.bpm ?? liveSnapshot?.bpm ?? deckA.bpm ?? deckB.bpm ?? null;
 
+  // Harmonic fit of the UP NEXT track against the live one (Camelot wheel).
+  const nextKeyFit = keyFit(liveSnapshot?.cues?.key ?? null, idleSnapshot.cues?.key ?? null);
+
   const liveExitSpot = useMemo(
     () => (liveSnapshot ? getActiveExitSpot(liveSnapshot.cues, liveSnapshot.currentTime) : null),
     [liveSnapshot],
@@ -354,6 +358,7 @@ export function DjConsole({
       confidence,
       exitQuality: liveExitSpot?.quality ?? null,
       entryQuality: idleEntrySpot?.quality ?? null,
+      keyFit: nextKeyFit,
     });
   }, [
     idleSnapshot.track,
@@ -368,6 +373,7 @@ export function DjConsole({
     liveSnapshot?.currentTime,
     liveExitSpot?.quality,
     liveExitSpot?.sec,
+    nextKeyFit,
     mixMode,
     fadeBars,
   ]);
@@ -684,6 +690,7 @@ export function DjConsole({
         if (endedSnap.track) excludeIds.add(endedSnap.track.id);
         const picked = pickAutoNextTrack(allTracks, {
           referenceBpm: endedSnap.bpm ?? endedSnap.track?.bpm ?? null,
+          referenceKey: endedSnap.cues?.key ?? null,
           playedIds: playedIdsRef.current,
           excludeIds,
         });
@@ -767,6 +774,7 @@ export function DjConsole({
 
       const picked = pickAutoNextTrack(tracks, {
         referenceBpm: liveSnapshot.bpm ?? liveSnapshot.track.bpm,
+        referenceKey: liveSnapshot.cues?.key ?? null,
         playedIds,
         excludeIds,
       });
@@ -1305,6 +1313,7 @@ export function DjConsole({
               deckId="A"
               deck={deckA}
               isLive={liveDeck === "A"}
+              keyFit={idleDeck === "A" ? nextKeyFit : null}
               audibility={audibilityA}
               isEndingSoon={isAEndingSoon}
               playBlockedByFader={playBlockedA}
@@ -1340,6 +1349,7 @@ export function DjConsole({
               deckId="B"
               deck={deckB}
               isLive={liveDeck === "B"}
+              keyFit={idleDeck === "B" ? nextKeyFit : null}
               audibility={audibilityB}
               isEndingSoon={isBEndingSoon}
               playBlockedByFader={playBlockedB}
@@ -1405,6 +1415,7 @@ export function DjConsole({
                   deckId="A"
                   deck={deckA}
                   isLive={liveDeck === "A"}
+                  keyFit={idleDeck === "A" ? nextKeyFit : null}
                   audibility={audibilityA}
                   isEndingSoon={isAEndingSoon}
                   playBlockedByFader={playBlockedA}
@@ -1442,6 +1453,7 @@ export function DjConsole({
                   deckId="B"
                   deck={deckB}
                   isLive={liveDeck === "B"}
+                  keyFit={idleDeck === "B" ? nextKeyFit : null}
                   audibility={audibilityB}
                   isEndingSoon={isBEndingSoon}
                   playBlockedByFader={playBlockedB}
