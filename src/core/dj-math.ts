@@ -1218,6 +1218,8 @@ export type TransitionTechnique =
 export interface TransitionPlan {
   technique: TransitionTechnique;
   durationMs: number;
+  /** Fade length in bars (8 or 16) when beat-gridded, or null when ungridded / echo-out. */
+  fadeBars: number | null;
   label: string;
   /** Starting playbackRate for the incoming deck (1.0 when unsynced). */
   initialPlaybackRate: number;
@@ -1245,36 +1247,70 @@ function smoothstep(v: number): number {
   return x * x * (3 - 2 * x);
 }
 
+function echoDelayForBpm(fromBpm: number | null): number {
+  return fromBpm && fromBpm > 0
+    ? Math.min(0.65, Math.max(0.22, (60 / fromBpm) * 0.75))
+    : 0.375;
+}
+
+function barFadeDurationMs(fromBpm: number, bars: number): number {
+  return Math.round(bars * ((4 * 60) / fromBpm) * 1000);
+}
+
 /**
- * Chooses the optimal transition technique, duration, tempo-sync ratio, and
- * BPM-synced echo delay based on the user's mix mode and both decks' BPMs.
+ * Chooses the optimal transition technique, bar-aligned duration, tempo-sync ratio,
+ * and BPM-synced echo delay based on mix mode, BPM fit, cue confidence, and chosen
+ * entry/exit spot qualities. Low confidence or any risky spot forces echo-out + drop.
  */
 export function planMixTransition(options: {
   mode: MixMode;
   fromBpm: number | null;
   toBpm: number | null;
   baseDurationMs: number;
+  confidence?: "high" | "low";
+  exitQuality?: SpotQuality | null;
+  entryQuality?: SpotQuality | null;
 }): TransitionPlan {
-  const { mode, fromBpm, toBpm, baseDurationMs } = options;
+  const { mode, fromBpm, toBpm, baseDurationMs, confidence, exitQuality, entryQuality } = options;
   const safeBase = Math.max(1500, Math.min(12000, baseDurationMs));
+  const hasGrid = confidence === "high" && fromBpm !== null && fromBpm > 0;
 
   if (mode === "classic") {
     return {
       technique: "classic",
       durationMs: safeBase,
-      label: "Classic Fade",
+      fadeBars: null,
+      label: "Classic fade",
       initialPlaybackRate: 1,
       echoDelaySec: 0,
     };
   }
 
   if (mode === "bass-swap") {
+    const fadeBars = hasGrid
+      ? exitQuality === "good" && entryQuality === "good" && safeBase >= 8000
+        ? 16
+        : 8
+      : null;
     return {
       technique: "bass-swap",
-      durationMs: safeBase,
-      label: "Bass Swap",
+      durationMs: fadeBars !== null && fromBpm ? barFadeDurationMs(fromBpm, fadeBars) : safeBase,
+      fadeBars,
+      label: "Bass swap",
       initialPlaybackRate: 1,
       echoDelaySec: 0,
+    };
+  }
+
+  // Low analysis confidence or a risky exit/entry forces echo-out + drop on beat 1
+  if (confidence === "low" || exitQuality === "risky" || entryQuality === "risky") {
+    return {
+      technique: "echo-out",
+      durationMs: Math.max(2000, Math.min(safeBase, 2600)),
+      fadeBars: null,
+      label: "Echo out",
+      initialPlaybackRate: 1,
+      echoDelaySec: echoDelayForBpm(fromBpm),
     };
   }
 
@@ -1295,40 +1331,43 @@ export function planMixTransition(options: {
     const rawRate = fromBpm / (toBpm * bestMult);
     const clampedRate = Math.min(1.06, Math.max(0.94, rawRate));
     const initialPlaybackRate = Math.abs(clampedRate - 1) < 0.004 ? 1 : clampedRate;
-    const durationMs = Math.round(Math.min(9000, Math.max(3500, safeBase * 1.15)));
+    const fadeBars = hasGrid
+      ? exitQuality === "good" && entryQuality === "good" && safeBase >= 5000
+        ? 16
+        : 8
+      : null;
+    const durationMs =
+      fadeBars !== null
+        ? barFadeDurationMs(fromBpm, fadeBars)
+        : Math.round(Math.min(9000, Math.max(3500, safeBase * 1.15)));
 
     return {
       technique: "sync-bass-swap",
       durationMs,
-      label:
-        initialPlaybackRate !== 1
-          ? `Sync ${Math.round(fromBpm)} BPM · Bass Swap`
-          : "Bass Swap",
+      fadeBars,
+      label: initialPlaybackRate !== 1 ? "Sync · Bass swap" : "Bass swap",
       initialPlaybackRate,
       echoDelaySec: 0,
     };
   }
 
   if (fit.status === "clash") {
-    // Dotted-eighth (3/4 beat) delay synced to outgoing tempo — classic club echo-out
-    const echoDelaySec =
-      fromBpm && fromBpm > 0
-        ? Math.min(0.65, Math.max(0.22, (60 / fromBpm) * 0.75))
-        : 0.375;
-
     return {
       technique: "echo-out",
       durationMs: Math.max(2000, Math.min(safeBase, 2600)),
-      label: "Echo Out",
+      fadeBars: null,
+      label: "Echo out",
       initialPlaybackRate: 1,
-      echoDelaySec,
+      echoDelaySec: echoDelayForBpm(fromBpm),
     };
   }
 
+  const fadeBars = hasGrid ? 8 : null;
   return {
     technique: "filter-sweep",
-    durationMs: safeBase,
-    label: "Filter Sweep",
+    durationMs: fadeBars !== null && fromBpm ? barFadeDurationMs(fromBpm, fadeBars) : safeBase,
+    fadeBars,
+    label: "Filter sweep",
     initialPlaybackRate: 1,
     echoDelaySec: 0,
   };

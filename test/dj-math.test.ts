@@ -234,6 +234,70 @@ describe("Smart Mix planner & DSP curves", () => {
     expect(tail.incoming.gain).toBeCloseTo(1, 3);
     expect(tail.incoming.bassDb).toBe(0);
   });
+
+  test("forces echo-out when confidence is low or exit/entry quality is risky", () => {
+    const lowConf = planMixTransition({
+      mode: "smart",
+      fromBpm: 124,
+      toBpm: 124,
+      baseDurationMs: 5000,
+      confidence: "low",
+      exitQuality: "good",
+      entryQuality: "good",
+    });
+    expect(lowConf.technique).toBe("echo-out");
+    expect(lowConf.fadeBars).toBeNull();
+
+    const riskyExit = planMixTransition({
+      mode: "smart",
+      fromBpm: 124,
+      toBpm: 124,
+      baseDurationMs: 5000,
+      confidence: "high",
+      exitQuality: "risky",
+      entryQuality: "good",
+    });
+    expect(riskyExit.technique).toBe("echo-out");
+
+    const riskyEntry = planMixTransition({
+      mode: "smart",
+      fromBpm: 124,
+      toBpm: 124,
+      baseDurationMs: 5000,
+      confidence: "high",
+      exitQuality: "good",
+      entryQuality: "risky",
+    });
+    expect(riskyEntry.technique).toBe("echo-out");
+  });
+
+  test("computes 8-bar or 16-bar beat-gridded fade duration from outgoing BPM", () => {
+    const goodPair = planMixTransition({
+      mode: "smart",
+      fromBpm: 120,
+      toBpm: 122,
+      baseDurationMs: 5000,
+      confidence: "high",
+      exitQuality: "good",
+      entryQuality: "good",
+    });
+    expect(goodPair.technique).toBe("sync-bass-swap");
+    expect(goodPair.fadeBars).toBe(16);
+    expect(goodPair.durationMs).toBe(32000); // 16 bars at 120 BPM = 32s
+
+    const okPair = planMixTransition({
+      mode: "smart",
+      fromBpm: 120,
+      toBpm: 122,
+      baseDurationMs: 5000,
+      confidence: "high",
+      exitQuality: "ok",
+      entryQuality: "good",
+    });
+    expect(okPair.technique).toBe("sync-bass-swap");
+    expect(okPair.fadeBars).toBe(8);
+    expect(okPair.durationMs).toBe(16000); // 8 bars at 120 BPM = 16s
+  });
 });
 
 /**

@@ -22,6 +22,7 @@ import {
 import { toast } from "sonner";
 import {
   equalPowerGains,
+  findCueSpot,
   getActiveExitSpot,
   getIdleDeck,
   getLiveDeck,
@@ -81,7 +82,8 @@ interface DjConsoleProps {
   onMobileTabChange: (tab: MobileTab) => void;
 }
 
-const AUTO_FADE_LEAD_BUFFER_SEC = 2.5;
+const AUTO_MIX_FLAG_LEAD_SEC = 0.5;
+const FALLBACK_AUTO_FADE_LEAD_BUFFER_SEC = 2.5;
 const MIX_MODE_STORAGE_KEY = "portable-dj:mix-mode";
 const trackCollator = new Intl.Collator(undefined, { sensitivity: "base" });
 
@@ -286,6 +288,22 @@ export function DjConsole({
   const referenceBpm =
     lastQueuedBpm ?? idleSnapshot.bpm ?? liveSnapshot?.bpm ?? deckA.bpm ?? deckB.bpm ?? null;
 
+  const liveExitSpot = useMemo(
+    () => (liveSnapshot ? getActiveExitSpot(liveSnapshot.cues, liveSnapshot.currentTime) : null),
+    [liveSnapshot],
+  );
+
+  const idleEntrySpot = useMemo(
+    () =>
+      idleSnapshot.cues
+        ? findCueSpot(
+            idleSnapshot.cues.entries,
+            idleSnapshot.selectedEntryBar ?? idleSnapshot.cues.bestEntryBar,
+          )
+        : null,
+    [idleSnapshot.cues, idleSnapshot.selectedEntryBar],
+  );
+
   const upcomingTransitionPlan = useMemo(() => {
     if (!idleSnapshot.track) return null;
     if (!liveSnapshot?.isPlaying) {
@@ -296,18 +314,38 @@ export function DjConsole({
         baseDurationMs: fadeSeconds * 1000,
       });
     }
+    const liveCues = liveSnapshot.cues;
+    const idleCues = idleSnapshot.cues;
+    const confidence: "high" | "low" | undefined =
+      liveCues && idleCues
+        ? liveCues.confidence === "high" &&
+          idleCues.confidence === "high" &&
+          liveCues.grid !== null &&
+          idleCues.grid !== null
+          ? "high"
+          : "low"
+        : liveCues?.confidence === "low" || idleCues?.confidence === "low"
+          ? "low"
+          : undefined;
     return planMixTransition({
       mode: mixMode,
       fromBpm: liveSnapshot.bpm ?? liveSnapshot.track?.bpm ?? null,
       toBpm: idleSnapshot.bpm ?? idleSnapshot.track.bpm,
       baseDurationMs: fadeSeconds * 1000,
+      confidence,
+      exitQuality: liveExitSpot?.quality ?? null,
+      entryQuality: idleEntrySpot?.quality ?? null,
     });
   }, [
     idleSnapshot.track,
     idleSnapshot.bpm,
+    idleSnapshot.cues,
+    idleEntrySpot?.quality,
     liveSnapshot?.isPlaying,
     liveSnapshot?.bpm,
     liveSnapshot?.track?.bpm,
+    liveSnapshot?.cues,
+    liveExitSpot?.quality,
     mixMode,
     fadeSeconds,
   ]);
@@ -594,31 +632,38 @@ export function DjConsole({
   }, [idleSnapshot.track, queue.length, idleDeck, isAutoFading, stageNextFromQueue]);
 
   // Auto-Play safety net:
-  // 1) If queue & idle deck are empty near the end of the live song, auto-pick a random
-  //    unplayed cached track with a close BPM and stage it on the idle deck.
-  // 2) Auto-crossfade before the audible end (skipping quiet outro tails).
+  // 1) If queue & idle deck are empty ahead of the live deck's mix-out flag, auto-pick
+  //    a random unplayed cached track with a close BPM and stage it on the idle deck.
+  // 2) Trigger auto-mix at `exitFlag.sec - lead` so startAutoFade lands cleanly on beat 1.
   useEffect(() => {
     if (!autoPlayEnabled || isAutoFading || !liveDeck || !liveSnapshot?.track) return;
 
-    const activeExit = getActiveExitSpot(liveSnapshot.cues, liveSnapshot.currentTime);
-    const effectiveEnd = activeExit
-      ? Math.min(liveSnapshot.duration, activeExit.sec)
-      : liveSnapshot.duration;
     const plannedFadeSec = upcomingTransitionPlan
       ? upcomingTransitionPlan.durationMs / 1000
       : fadeSeconds;
-    const triggerLeadSec = plannedFadeSec + AUTO_FADE_LEAD_BUFFER_SEC;
-    if (effectiveEnd <= triggerLeadSec + 2) return;
 
-    const remaining = effectiveEnd - liveSnapshot.currentTime;
-    const triggerKey = `${liveDeck}:${liveSnapshot.track.id}`;
+    let timeToMix: number;
+    let triggerKey: string;
+    let minTriggerWindow: number;
 
-    // Pre-stage a close-BPM random track ~8s before the auto-fade point if nothing is queued
+    if (liveExitSpot) {
+      timeToMix = liveExitSpot.sec - liveSnapshot.currentTime;
+      triggerKey = `${liveDeck}:${liveSnapshot.track.id}:${liveExitSpot.bar}`;
+      minTriggerWindow = -0.25;
+    } else {
+      const triggerLeadSec = plannedFadeSec + FALLBACK_AUTO_FADE_LEAD_BUFFER_SEC;
+      if (liveSnapshot.duration <= triggerLeadSec + 2) return;
+      timeToMix = liveSnapshot.duration - triggerLeadSec - liveSnapshot.currentTime;
+      triggerKey = `${liveDeck}:${liveSnapshot.track.id}:fallback`;
+      minTriggerWindow = -(plannedFadeSec - 0.5);
+    }
+
+    // Pre-stage a close-BPM random track ~10s before the mix-out flag if nothing is queued
     if (
       !idleSnapshot.track &&
       queue.length === 0 &&
       tracks.length > 1 &&
-      remaining <= triggerLeadSec + 8 &&
+      timeToMix <= 10 &&
       autoPickTriggeredForRef.current !== triggerKey
     ) {
       const excludeIds = new Set<string>();
@@ -645,8 +690,8 @@ export function DjConsole({
     }
 
     if (
-      remaining <= triggerLeadSec &&
-      remaining > 0.2 &&
+      timeToMix <= AUTO_MIX_FLAG_LEAD_SEC &&
+      timeToMix > minTriggerWindow &&
       idleSnapshot.track &&
       autoFadeTriggeredForRef.current !== triggerKey
     ) {
@@ -678,6 +723,7 @@ export function DjConsole({
     isAutoFading,
     liveDeck,
     liveSnapshot,
+    liveExitSpot,
     idleDeck,
     idleSnapshot.track,
     deckA.track,
