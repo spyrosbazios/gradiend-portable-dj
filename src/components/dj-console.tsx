@@ -1241,18 +1241,27 @@ export function DjConsole({
     [sortedTracks, query],
   );
 
-  // Tracks whose cached BPM mixes smoothly into the reference, closest first.
+  // BPM MATCH always follows the song on air (falls back to the staged deck before anything plays).
+  const matchBpm =
+    liveSnapshot?.bpm ?? liveSnapshot?.track?.bpm ?? idleSnapshot.bpm ?? idleSnapshot.track?.bpm ?? null;
+
+  // Tracks that mix into the on-air BPM: smooth (green) first, then shift (yellow), closest first.
   const bpmMatchTracks = useMemo(() => {
-    if (referenceBpm === null) return [];
+    if (matchBpm === null) return [];
     const deckIds = new Set([deckA.track?.id, deckB.track?.id]);
+    const rank = { good: 0, ok: 1 } as const;
     return tracks
       .filter((t) => t.bpm !== null && !deckIds.has(t.id) && !playedIds.has(t.id))
-      .map((t) => ({ track: t, fit: evaluateBpmFit(referenceBpm, t.bpm) }))
-      .filter((m) => m.fit.status === "good")
-      .sort((a, b) => Math.abs(a.fit.diffBpm) - Math.abs(b.fit.diffBpm))
+      .map((t) => ({ track: t, fit: evaluateBpmFit(matchBpm, t.bpm) }))
+      .flatMap((m) =>
+        m.fit.status === "good" || m.fit.status === "ok"
+          ? [{ ...m, rank: rank[m.fit.status] }]
+          : [],
+      )
+      .sort((a, b) => a.rank - b.rank || Math.abs(a.fit.diffBpm) - Math.abs(b.fit.diffBpm))
       .slice(0, BPM_MATCH_LIMIT)
       .map((m) => m.track);
-  }, [tracks, referenceBpm, deckA.track?.id, deckB.track?.id, playedIds]);
+  }, [tracks, matchBpm, deckA.track?.id, deckB.track?.id, playedIds]);
 
   const ThemeIcon = theme === "light" ? Sun : theme === "oled" ? Monitor : Moon;
 
@@ -1437,6 +1446,7 @@ export function DjConsole({
             <LibraryPanel
               tracks={filteredTracks}
               matchTracks={bpmMatchTracks}
+              matchBpm={matchBpm}
               totalCount={tracks.length}
               query={query}
               sortMode={sortMode}
@@ -1540,6 +1550,7 @@ export function DjConsole({
               <LibraryPanel
                 tracks={filteredTracks}
                 matchTracks={bpmMatchTracks}
+              matchBpm={matchBpm}
                 totalCount={tracks.length}
                 query={query}
                 sortMode={sortMode}

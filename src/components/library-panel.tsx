@@ -35,6 +35,8 @@ type ColumnId = "library" | "match";
 interface LibraryPanelProps {
   tracks: TrackItem[];
   matchTracks: TrackItem[];
+  /** BPM of the song on air; the BPM MATCH column is graded against it. */
+  matchBpm: number | null;
   totalCount: number;
   query: string;
   sortMode: SortMode;
@@ -66,6 +68,7 @@ const SORT_LABELS: Record<SortMode, string> = {
 export const LibraryPanel = memo(function LibraryPanel({
   tracks,
   matchTracks,
+  matchBpm,
   totalCount,
   query,
   sortMode,
@@ -242,15 +245,15 @@ export const LibraryPanel = memo(function LibraryPanel({
           <div className="flex min-h-0 flex-col border-t border-line md:border-t-0 md:border-l">
             <div className="flex items-center gap-1.5 px-3 pt-2">
               <h3 className="text-xs font-bold tracking-wider text-dim">BPM MATCH</h3>
-              {referenceBpm !== null && (
+              {matchBpm !== null && (
                 <span className="font-mono text-xs text-faint tabular-nums">
-                  {Math.round(referenceBpm)} · {matchTracks.length}
+                  {Math.round(matchBpm)} · {matchTracks.length}
                 </span>
               )}
             </div>
             {matchTracks.length === 0 ? (
               <p className="px-3 py-2 text-xs text-faint">
-                {referenceBpm === null
+                {matchBpm === null
                   ? "Load a track to see BPM matches."
                   : "No cached BPMs match yet. Matches appear as tracks are analysed."}
               </p>
@@ -258,6 +261,8 @@ export const LibraryPanel = memo(function LibraryPanel({
               <TrackColumn
                 {...columnProps}
                 tracks={matchTracks}
+                referenceBpm={matchBpm}
+                gradeEveryRow
                 followsQuery={false}
                 active={activeColumn === "match"}
                 onActivate={() => setActiveColumn("match")}
@@ -274,6 +279,8 @@ interface TrackColumnProps {
   tracks: TrackItem[];
   /** Saves/restores browse position across a search and resets selection on new queries. */
   followsQuery: boolean;
+  /** Colour every row's BPM by fit, not just the selected one. */
+  gradeEveryRow?: boolean;
   /** Only the active column answers arrow / Enter / queue keys. */
   active: boolean;
   onActivate: () => void;
@@ -296,6 +303,7 @@ interface TrackColumnProps {
 const TrackColumn = memo(function TrackColumn({
   tracks,
   followsQuery,
+  gradeEveryRow = false,
   active,
   onActivate,
   query,
@@ -572,7 +580,11 @@ const TrackColumn = memo(function TrackColumn({
           const isPlayed = playedIds.has(track.id);
           const isLiveTrack = (onA && liveDeck === "A") || (onB && liveDeck === "B");
           const isSelected = active && vRow.index === clampedIndex;
-          const selectedFit = isSelected ? activeFit : null;
+          const selectedFit = isSelected
+            ? activeFit
+            : gradeEveryRow && referenceBpm !== null
+              ? evaluateBpmFit(referenceBpm, track.bpm)
+              : null;
 
           return (
             <div
