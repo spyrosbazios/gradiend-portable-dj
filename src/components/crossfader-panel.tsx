@@ -279,11 +279,11 @@ export const CrossfaderPanel = memo(function CrossfaderPanel({
           )}
         </Button>
 
-        <div className="flex items-center justify-between gap-1">
+        <div className="flex flex-col gap-1.5">
           <div
             role="group"
             aria-label="Mix style"
-            className="inline-flex items-center rounded-md border border-line bg-bg/60 p-0.5"
+            className="flex items-center rounded-md border border-line bg-bg/60 p-0.5"
           >
             {MIX_MODES.map((m) => (
               <button
@@ -293,7 +293,7 @@ export const CrossfaderPanel = memo(function CrossfaderPanel({
                 aria-pressed={mixMode === m.id}
                 onClick={() => onMixModeChange(m.id)}
                 className={cn(
-                  "rounded px-1.5 py-0.5 text-[10px] font-semibold transition-colors",
+                  "flex-1 rounded px-1.5 py-0.5 text-[10px] font-semibold transition-colors",
                   mixMode === m.id
                     ? "bg-brand-soft text-brand"
                     : "text-dim hover:text-fg",
@@ -313,7 +313,7 @@ export const CrossfaderPanel = memo(function CrossfaderPanel({
                 title={`Mix over ${bars} bars`}
                 onClick={() => onFadeBarsChange(bars)}
                 className={cn(
-                  "rounded px-1.5 py-0.5 font-mono text-[10px] transition-colors",
+                  "flex-1 rounded px-1.5 py-0.5 font-mono text-[10px] transition-colors",
                   fadeBars === bars
                     ? "bg-brand-soft font-semibold text-brand"
                     : "text-dim hover:bg-raised",
@@ -322,7 +322,7 @@ export const CrossfaderPanel = memo(function CrossfaderPanel({
                 {bars}
               </button>
             ))}
-            <span className="pl-0.5 text-[10px] text-faint">bars</span>
+            <span className="shrink-0 pl-1 text-[10px] text-faint">bars</span>
           </div>
         </div>
       </div>

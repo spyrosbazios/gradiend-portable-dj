@@ -1,6 +1,5 @@
 import { memo, useEffect, useRef } from "react";
 import { motion, useMotionValue, useSpring, useTransform } from "framer-motion";
-import { Lock } from "lucide-react";
 import type { CueSpot, DeckId } from "@/core/dj-math";
 import { useTheme } from "@/hooks/use-theme";
 import { cn } from "@/lib/utils";
@@ -302,14 +301,6 @@ export const WaveformCanvas = memo(function WaveformCanvas({
           </div>
         )}
 
-        {hasTrack && locked && (
-          <div
-            aria-label="Waveform locked"
-            className="pointer-events-none absolute right-2 bottom-1.5 flex items-center rounded-md bg-card/90 p-1 text-dim"
-          >
-            <Lock className="size-3" />
-          </div>
-        )}
       </div>
 
       <canvas

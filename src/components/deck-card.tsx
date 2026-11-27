@@ -1,6 +1,7 @@
 import { memo, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Download,
   ChevronLeft,
   ChevronRight,
   Disc3,
@@ -18,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { WaveformCanvas } from "@/components/waveform-canvas";
+import { TRACK_DRAG_MIME } from "@/lib/track-drag";
 
 interface DeckCardProps {
   deckId: DeckId;
@@ -37,6 +39,8 @@ interface DeckCardProps {
   onSoftStop: () => void;
   onSeek: (ratio: number) => void;
   onToggleLock: () => void;
+  /** Accepts a library track dropped onto the deck; omitted when the deck is on air. */
+  onDropTrack?: (trackId: string) => void;
 }
 
 export const DeckCard = memo(function DeckCard({
@@ -56,6 +60,7 @@ export const DeckCard = memo(function DeckCard({
   onSoftStop,
   onSeek,
   onToggleLock,
+  onDropTrack,
 }: DeckCardProps) {
   const isA = deckId === "A";
   const remaining = Math.max(0, deck.duration - deck.currentTime);
@@ -70,10 +75,36 @@ export const DeckCard = memo(function DeckCard({
     return () => window.clearTimeout(timer);
   }, [loadFlashKey]);
 
+  const [dragOver, setDragOver] = useState(false);
+  const acceptsDrag = (e: React.DragEvent) =>
+    Boolean(onDropTrack) && e.dataTransfer.types.includes(TRACK_DRAG_MIME);
+
   const glowStrength = Math.min(1, Math.max(0, audibility));
 
   return (
-    <div className="relative">
+    <div
+      className="relative h-full"
+      onDragEnter={(e) => {
+        if (!acceptsDrag(e)) return;
+        e.preventDefault();
+        setDragOver(true);
+      }}
+      onDragOver={(e) => {
+        if (!acceptsDrag(e)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false);
+      }}
+      onDrop={(e) => {
+        setDragOver(false);
+        const id = e.dataTransfer.getData(TRACK_DRAG_MIME);
+        if (!onDropTrack || !id) return;
+        e.preventDefault();
+        onDropTrack(id);
+      }}
+    >
       <motion.div
         aria-hidden="true"
         initial={false}
@@ -93,7 +124,7 @@ export const DeckCard = memo(function DeckCard({
         animate={showLoadedBanner ? { scale: [1, 1.012, 1] } : { scale: 1 }}
         transition={{ duration: 0.28, ease: [0.23, 1, 0.32, 1] }}
         className={cn(
-          "relative z-10 flex flex-col gap-3 overflow-hidden rounded-xl border bg-card p-3.5 transition-colors",
+          "relative z-10 flex h-full flex-col gap-3 overflow-hidden rounded-xl border bg-card p-3.5 transition-colors",
           isLive && isA && "border-deck-a ring-1 ring-deck-a/35",
           isLive && !isA && "border-deck-b ring-1 ring-deck-b/35",
           !isLive && "border-line",
@@ -366,6 +397,25 @@ export const DeckCard = memo(function DeckCard({
           </div>
         </div>
       )}
+      <AnimatePresence>
+        {dragOver && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.12, ease: "easeOut" }}
+            className={cn(
+              "pointer-events-none absolute inset-0 z-20 flex items-center justify-center gap-2 rounded-xl border-2 border-dashed text-sm font-semibold backdrop-blur-[2px]",
+              isA
+                ? "border-deck-a bg-deck-a-soft/70 text-deck-a"
+                : "border-deck-b bg-deck-b-soft/70 text-deck-b",
+            )}
+          >
+            <Download className="size-4" />
+            Drop to load on Deck {deckId}
+          </motion.div>
+        )}
+      </AnimatePresence>
       </motion.section>
     </div>
   );

@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { evaluateBpmFit, type DeckId } from "@/core/dj-math";
 import type { TrackItem } from "@/lib/audio-engine";
+import { TRACK_DRAG_MIME, setTrackDragImage } from "@/lib/track-drag";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -452,6 +453,14 @@ export const LibraryPanel = memo(function LibraryPanel({
                   className="py-0.5"
                 >
                   <div
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.effectAllowed = "copy";
+                      e.dataTransfer.setData(TRACK_DRAG_MIME, track.id);
+                      e.dataTransfer.setData("text/plain", `${track.artist} - ${track.title}`);
+                      setTrackDragImage(e, track.title);
+                      setSelectedIndex(vRow.index);
+                    }}
                     onClick={() => setSelectedIndex(vRow.index)}
                     onPointerMove={(e) => {
                       if (
@@ -463,7 +472,7 @@ export const LibraryPanel = memo(function LibraryPanel({
                       }
                     }}
                     className={cn(
-                      "relative flex h-full items-center justify-between gap-2 rounded-lg border px-2.5 transition-colors duration-150",
+                      "relative flex h-full cursor-grab items-center justify-between gap-2 rounded-lg border px-2.5 transition-colors duration-150 active:cursor-grabbing",
                       !isSelected && onA && "border-deck-a-line bg-deck-a-soft/50",
                       !isSelected && onB && "border-deck-b-line bg-deck-b-soft/50",
                       !isSelected && !onA && !onB && "border-transparent",

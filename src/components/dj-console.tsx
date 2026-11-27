@@ -982,6 +982,21 @@ export function DjConsole({
     [deckA.track, deckB.track, flashDeck, idleDeck, isAutoFading, liveDeck, playedIds],
   );
 
+  const handleDropTrack = useCallback(
+    (deck: DeckId, trackId: string) => {
+      const track = tracksRef.current.find((t) => t.id === trackId);
+      if (!track) return;
+      if (deck !== idleDeck) {
+        toast.error("Cannot overwrite the ON AIR deck while it is playing.");
+        return;
+      }
+      handleLoadNext(track);
+    },
+    [handleLoadNext, idleDeck],
+  );
+  const handleDropTrackA = useCallback((id: string) => handleDropTrack("A", id), [handleDropTrack]);
+  const handleDropTrackB = useCallback((id: string) => handleDropTrack("B", id), [handleDropTrack]);
+
   const ensureTrackAnalysis = useCallback((track: TrackItem) => {
     analysisScheduler.enqueue(track, "queued");
   }, []);
@@ -1331,6 +1346,7 @@ export function DjConsole({
               onSoftStop={handleSoftStopA}
               onSeek={handleSeekA}
               onToggleLock={handleToggleLockA}
+              onDropTrack={liveDeck === "A" ? undefined : handleDropTrackA}
             />
             <CrossfaderPanel
               crossfade={crossfade}
@@ -1363,6 +1379,7 @@ export function DjConsole({
               onSoftStop={handleSoftStopB}
               onSeek={handleSeekB}
               onToggleLock={handleToggleLockB}
+              onDropTrack={liveDeck === "B" ? undefined : handleDropTrackB}
             />
           </div>
 
