@@ -285,10 +285,13 @@ export const WaveformCanvas = memo(function WaveformCanvas({
     const ratio = ratioAt(e);
     setScrubRatio(null);
     onSeek(ratio);
+    // A mouse scrub must not keep focus, or ←/→ would seek here instead of stepping UP NEXT's entry.
+    e.currentTarget.blur();
   };
 
-  const handlePointerCancel = () => {
+  const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!scrubbing) return;
+    e.currentTarget.blur();
     setScrubRatio(null);
     rawProgress.set(Math.min(1, Math.max(0, progress)));
   };

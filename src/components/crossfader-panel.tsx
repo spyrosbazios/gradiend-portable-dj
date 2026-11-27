@@ -110,6 +110,8 @@ function CrossfaderControl({ value, isAutoFading, onChange }: CrossfaderControlP
     if (drag.current?.pointerId !== e.pointerId) return;
     drag.current = null;
     setDragging(false);
+    // Pointer drags must not keep keyboard focus; ←/→ belong to the UP NEXT entry flag.
+    e.currentTarget.blur();
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
