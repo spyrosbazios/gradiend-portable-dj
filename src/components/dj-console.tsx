@@ -80,7 +80,6 @@ interface DjConsoleProps {
 }
 
 const AUTO_FADE_LEAD_BUFFER_SEC = 2.5;
-const MANUAL_MIX_EJECT_DELAY_MS = 3000;
 const MIX_MODE_STORAGE_KEY = "portable-dj:mix-mode";
 const trackCollator = new Intl.Collator(undefined, { sensitivity: "base" });
 
@@ -562,21 +561,21 @@ export function DjConsole({
     };
   }, [flashDeck, retireDeck]);
 
-  // Manual mix finished: both decks running but the fader has rested fully on one side.
-  // After a short grace period (so a quick fader rock isn't punished) eject the silent deck.
-  const mutedDeck: DeckId | null =
-    isAutoFading || !deckA.isPlaying || !deckB.isPlaying
-      ? null
-      : isDeckFadedOut("A", crossfade)
-        ? "A"
-        : isDeckFadedOut("B", crossfade)
-          ? "B"
-          : null;
+  // A deck that has already been played is spent once the mix lands on the other deck:
+  // eject it right away (playing or stopped) so the fader can never bring the previous song back.
+  // A freshly loaded, never-started track stays — that is the DJ's next pick.
+  const isSpent = (snap: typeof deckA) =>
+    snap.track !== null && (snap.isPlaying || snap.currentTime > 0.5);
+  const spentDeck: DeckId | null = isAutoFading
+    ? null
+    : deckB.isPlaying && isDeckFadedOut("A", crossfade) && isSpent(deckA)
+      ? "A"
+      : deckA.isPlaying && isDeckFadedOut("B", crossfade) && isSpent(deckB)
+        ? "B"
+        : null;
   useEffect(() => {
-    if (!mutedDeck) return;
-    const timer = window.setTimeout(() => retireDeck(mutedDeck), MANUAL_MIX_EJECT_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [mutedDeck, retireDeck]);
+    if (spentDeck) retireDeck(spentDeck);
+  }, [spentDeck, retireDeck]);
 
   // Auto-stage first queued track into the idle deck if idle deck is empty
   useEffect(() => {
