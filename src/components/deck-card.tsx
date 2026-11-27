@@ -1,7 +1,16 @@
 import { memo, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Disc3, Lock, Play, Sparkles, Square, Unlock } from "lucide-react";
-import { formatTime, type DeckId } from "@/core/dj-math";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Disc3,
+  Lock,
+  Play,
+  Sparkles,
+  Square,
+  Unlock,
+} from "lucide-react";
+import { formatTime, type CueSpot, type DeckId } from "@/core/dj-math";
 import type { DeckSnapshot } from "@/lib/audio-engine";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -17,10 +26,26 @@ interface DeckCardProps {
   isEndingSoon: boolean;
   playBlockedByFader: boolean;
   loadFlashKey: number;
+  cueSpots?: CueSpot[];
+  flagSec?: number | null;
+  selectedEntrySpot?: CueSpot | null;
+  canStepEntryPrev?: boolean;
+  canStepEntryNext?: boolean;
+  onStepEntry?: (delta: -1 | 1) => void;
   onPlay: () => void;
   onSoftStop: () => void;
   onSeek: (ratio: number) => void;
   onToggleLock: () => void;
+}
+
+function formatEntryVerdict(spot: CueSpot): string {
+  const prefix =
+    spot.quality === "good"
+      ? "Good entry"
+      : spot.quality === "risky"
+        ? "Risky entry"
+        : "Ok entry";
+  return `${prefix} · ${spot.reason}`;
 }
 
 export const DeckCard = memo(function DeckCard({
@@ -31,6 +56,12 @@ export const DeckCard = memo(function DeckCard({
   isEndingSoon,
   playBlockedByFader,
   loadFlashKey,
+  cueSpots,
+  flagSec,
+  selectedEntrySpot,
+  canStepEntryPrev = false,
+  canStepEntryNext = false,
+  onStepEntry,
   onPlay,
   onSoftStop,
   onSeek,
@@ -233,72 +264,121 @@ export const DeckCard = memo(function DeckCard({
         peaks={deck.peaks}
         loading={deck.peaksLoading}
         progress={progress}
+        duration={deck.duration}
+        spots={cueSpots}
+        flagSec={flagSec}
         locked={deck.waveformLocked}
         hasTrack={Boolean(deck.track)}
         onSeek={onSeek}
       />
 
-      <div className="relative flex min-h-8 items-center justify-between gap-2">
-        <div>
-          {deck.track && (deck.isPlaying || !playBlockedByFader) && (
-            <Button
-              size="sm"
-              onClick={deck.isPlaying ? onSoftStop : onPlay}
-              variant={deck.isPlaying ? "secondary" : "default"}
-              className={cn(
-                "min-w-28 font-semibold",
-                !deck.isPlaying && isA && "bg-deck-a text-bg hover:bg-deck-a/90",
-                !deck.isPlaying && !isA && "bg-deck-b text-bg hover:bg-deck-b/90",
-              )}
-            >
-              {deck.isPlaying ? (
-                <>
-                  <Square className="size-3.5 fill-current" />
-                  Stop
-                </>
-              ) : (
-                <>
-                  <Play className="size-3.5 fill-current" />
-                  Play
-                </>
-              )}
-            </Button>
-          )}
-        </div>
+      {!isLive && deck.track && selectedEntrySpot && onStepEntry && (
+        <div
+          aria-label="Entry phrase selector"
+          className="relative flex items-center gap-1.5"
+        >
+          <Button
+            size="icon-xs"
+            variant="outline"
+            disabled={!canStepEntryPrev}
+            onClick={() => onStepEntry(-1)}
+            aria-label="Previous entry phrase"
+            title="Previous entry phrase (Left Arrow)"
+          >
+            <ChevronLeft className="size-3.5" />
+          </Button>
 
-        <div className="flex items-center gap-1.5">
-          {isEndingSoon && (
-            <span className="text-xs font-semibold text-warn">Ending</span>
-          )}
-          {deck.track && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  onClick={onToggleLock}
-                  aria-label={
-                    deck.waveformLocked
-                      ? "Unlock waveform scrubbing"
-                      : "Lock waveform scrubbing"
-                  }
-                >
-                  {deck.waveformLocked ? (
-                    <Lock className="size-4 text-warn" />
-                  ) : (
-                    <Unlock className="size-4 text-dim" />
-                  )}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                {deck.waveformLocked
-                  ? "Waveform locked to prevent accidental skips (click to unlock)"
-                  : "Click waveform to cue start position"}
-              </TooltipContent>
-            </Tooltip>
-          )}
+          <div
+            className={cn(
+              "min-w-0 flex-1 truncate rounded-md border px-2 py-1 text-center text-xs font-medium",
+              selectedEntrySpot.quality === "good" &&
+                "border-up-subtle bg-up-soft text-up",
+              selectedEntrySpot.quality === "ok" &&
+                "border-warn-subtle bg-warn-soft text-warn",
+              selectedEntrySpot.quality === "risky" &&
+                "border-down-subtle bg-down-soft text-down",
+            )}
+            title={formatEntryVerdict(selectedEntrySpot)}
+          >
+            {formatEntryVerdict(selectedEntrySpot)}
+          </div>
+
+          <Button
+            size="icon-xs"
+            variant="outline"
+            disabled={!canStepEntryNext}
+            onClick={() => onStepEntry(1)}
+            aria-label="Next entry phrase"
+            title="Next entry phrase (Right Arrow)"
+          >
+            <ChevronRight className="size-3.5" />
+          </Button>
         </div>
-      </div>
+      )}
+
+      {(isLive || !selectedEntrySpot || !playBlockedByFader || deck.isPlaying) && (
+        <div className="relative flex min-h-8 items-center justify-between gap-2">
+          <div>
+            {deck.track && (deck.isPlaying || !playBlockedByFader) && (
+              <Button
+                size="sm"
+                onClick={deck.isPlaying ? onSoftStop : onPlay}
+                variant={deck.isPlaying ? "secondary" : "default"}
+                className={cn(
+                  "min-w-28 font-semibold",
+                  !deck.isPlaying && isA && "bg-deck-a text-bg hover:bg-deck-a/90",
+                  !deck.isPlaying && !isA && "bg-deck-b text-bg hover:bg-deck-b/90",
+                )}
+              >
+                {deck.isPlaying ? (
+                  <>
+                    <Square className="size-3.5 fill-current" />
+                    Stop
+                  </>
+                ) : (
+                  <>
+                    <Play className="size-3.5 fill-current" />
+                    Play
+                  </>
+                )}
+              </Button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {isEndingSoon && (
+              <span className="text-xs font-semibold text-warn">Ending</span>
+            )}
+            {deck.track && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    onClick={onToggleLock}
+                    aria-label={
+                      deck.waveformLocked
+                        ? "Unlock waveform scrubbing"
+                        : "Lock waveform scrubbing"
+                    }
+                  >
+                    {deck.waveformLocked ? (
+                      <Lock className="size-4 text-warn" />
+                    ) : (
+                      <Unlock className="size-4 text-dim" />
+                    )}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {deck.waveformLocked
+                    ? "Waveform locked to prevent accidental skips (click to unlock)"
+                    : "Click waveform to cue start position"}
+                </TooltipContent>
+              </Tooltip>
+            )}
+          </div>
+        </div>
+      )}
       </motion.section>
     </div>
   );

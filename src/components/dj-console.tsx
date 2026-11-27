@@ -24,13 +24,16 @@ import {
   equalPowerGains,
   findCueSpot,
   getActiveExitSpot,
+  getExitQualityAtTime,
   getIdleDeck,
   getLiveDeck,
+  getNextBeatOneSec,
   isDeckFadedOut,
   pickAutoNextTrack,
   planMixTransition,
   type DeckId,
   type MixMode,
+  type SpotQuality,
   type TrackCues,
 } from "@/core/dj-math";
 import { THEMES, type ThemeName } from "@/core/theme";
@@ -86,6 +89,13 @@ const AUTO_MIX_FLAG_LEAD_SEC = 0.5;
 const FALLBACK_AUTO_FADE_LEAD_BUFFER_SEC = 2.5;
 const MIX_MODE_STORAGE_KEY = "portable-dj:mix-mode";
 const trackCollator = new Intl.Collator(undefined, { sensitivity: "base" });
+
+function formatCountdown(seconds: number): string {
+  const total = Math.max(0, Math.ceil(seconds));
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}:${String(secs).padStart(2, "0")}`;
+}
 
 function readInitialMixMode(): MixMode {
   try {
@@ -350,9 +360,67 @@ export function DjConsole({
     fadeSeconds,
   ]);
 
-  const transitionBadgeLabel = isAutoFading
-    ? activeTransitionLabel
-    : (upcomingTransitionPlan?.label ?? null);
+  const transitionBadgeLabel = useMemo(() => {
+    if (isAutoFading) return activeTransitionLabel;
+    if (!upcomingTransitionPlan) return null;
+    if (liveSnapshot?.isPlaying && liveExitSpot) {
+      const secsUntilFlag = Math.max(0, liveExitSpot.sec - liveSnapshot.currentTime);
+      return `In ${formatCountdown(secsUntilFlag)} · ${upcomingTransitionPlan.label}`;
+    }
+    return upcomingTransitionPlan.label;
+  }, [
+    isAutoFading,
+    activeTransitionLabel,
+    upcomingTransitionPlan,
+    liveSnapshot?.isPlaying,
+    liveSnapshot?.currentTime,
+    liveExitSpot,
+  ]);
+
+  const nextBeatQuality: SpotQuality | null = useMemo(() => {
+    if (!liveSnapshot?.isPlaying || !idleSnapshot.track) return null;
+    if (!liveSnapshot.cues?.grid) return "ok";
+    const nextBeat1 = getNextBeatOneSec(liveSnapshot.cues.grid, liveSnapshot.currentTime);
+    return getExitQualityAtTime(liveSnapshot.cues, nextBeat1);
+  }, [
+    liveSnapshot?.isPlaying,
+    liveSnapshot?.cues,
+    liveSnapshot?.currentTime,
+    idleSnapshot.track,
+  ]);
+
+  const entrySpotA = useMemo(
+    () =>
+      deckA.cues
+        ? findCueSpot(deckA.cues.entries, deckA.selectedEntryBar ?? deckA.cues.bestEntryBar)
+        : null,
+    [deckA.cues, deckA.selectedEntryBar],
+  );
+  const entrySpotB = useMemo(
+    () =>
+      deckB.cues
+        ? findCueSpot(deckB.cues.entries, deckB.selectedEntryBar ?? deckB.cues.bestEntryBar)
+        : null,
+    [deckB.cues, deckB.selectedEntryBar],
+  );
+
+  const entryIdxA =
+    deckA.cues && entrySpotA
+      ? deckA.cues.entries.findIndex((s) => s.bar === entrySpotA.bar)
+      : -1;
+  const entryIdxB =
+    deckB.cues && entrySpotB
+      ? deckB.cues.entries.findIndex((s) => s.bar === entrySpotB.bar)
+      : -1;
+
+  const exitSpotA = useMemo(
+    () => (liveDeck === "A" ? getActiveExitSpot(deckA.cues, deckA.currentTime) : null),
+    [liveDeck, deckA.cues, deckA.currentTime],
+  );
+  const exitSpotB = useMemo(
+    () => (liveDeck === "B" ? getActiveExitSpot(deckB.cues, deckB.currentTime) : null),
+    [liveDeck, deckB.cues, deckB.currentTime],
+  );
 
   const handlePlayDeck = useCallback(
     (id: DeckId) => {
@@ -386,6 +454,8 @@ export function DjConsole({
   const handleSeekB = useCallback((r: number) => djEngine.seek("B", r), []);
   const handleToggleLockA = useCallback(() => djEngine.toggleWaveformLock("A"), []);
   const handleToggleLockB = useCallback(() => djEngine.toggleWaveformLock("B"), []);
+  const handleStepEntryA = useCallback((delta: -1 | 1) => djEngine.stepSelectedEntry("A", delta), []);
+  const handleStepEntryB = useCallback((delta: -1 | 1) => djEngine.stepSelectedEntry("B", delta), []);
   const handleCrossfadeChange = useCallback((v: number) => djEngine.setCrossfade(v, true), []);
   const handleRemoveQueueAt = useCallback((idx: number) => {
     setQueue((prev) => prev.filter((_, i) => i !== idx));
@@ -484,23 +554,36 @@ export function DjConsole({
     };
   }, [deckA.isPlaying, deckB.isPlaying]);
 
-  // Left/Right arrow keys ALWAYS scrub the UP NEXT (idle) deck safely (never move search cursor)
+  // Left/Right arrow keys step the UP NEXT deck's entry phrase flag (shortcut to ‹ › buttons)
+  // Ignored while focus is in an input (e.g. library search), dialog, or slider.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
       if (document.querySelector('[role="dialog"]')) return;
       const target = e.target as HTMLElement | null;
+      const inInput =
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target?.isContentEditable === true;
+      if (inInput) return;
       if (target?.getAttribute("role") === "slider") return;
 
+      if (isAutoFading || !idleSnapshot.track || !idleSnapshot.cues) return;
       e.preventDefault();
-      if (isAutoFading || !idleSnapshot.track || idleSnapshot.waveformLocked) return;
-      const step = e.shiftKey ? 1 : 5;
-      djEngine.seekBySeconds(idleDeck, e.key === "ArrowRight" ? step : -step);
+      const stepHandler = idleDeck === "A" ? handleStepEntryA : handleStepEntryB;
+      stepHandler(e.key === "ArrowRight" ? 1 : -1);
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isAutoFading, idleDeck, idleSnapshot.track, idleSnapshot.waveformLocked]);
+  }, [
+    isAutoFading,
+    idleDeck,
+    idleSnapshot.track,
+    idleSnapshot.cues,
+    handleStepEntryA,
+    handleStepEntryB,
+  ]);
 
   // Mark tracks as "Played" after 30s of live playback
   useEffect(() => {
@@ -1214,6 +1297,14 @@ export function DjConsole({
               isEndingSoon={isAEndingSoon}
               playBlockedByFader={playBlockedA}
               loadFlashKey={loadFlashA}
+              cueSpots={liveDeck === "A" ? deckA.cues?.exits : deckA.cues?.entries}
+              flagSec={liveDeck === "A" ? (exitSpotA?.sec ?? null) : (entrySpotA?.sec ?? null)}
+              selectedEntrySpot={liveDeck === "A" ? null : entrySpotA}
+              canStepEntryPrev={entryIdxA > 0}
+              canStepEntryNext={
+                Boolean(deckA.cues) && entryIdxA >= 0 && entryIdxA < (deckA.cues?.entries.length ?? 0) - 1
+              }
+              onStepEntry={liveDeck === "A" ? undefined : handleStepEntryA}
               onPlay={handlePlayA}
               onSoftStop={handleSoftStopA}
               onSeek={handleSeekA}
@@ -1225,6 +1316,7 @@ export function DjConsole({
               fadeSeconds={fadeSeconds}
               mixMode={mixMode}
               transitionLabel={transitionBadgeLabel}
+              nextBeatQuality={nextBeatQuality}
               nextDeck={idleDeck}
               canAutoFade={Boolean(idleSnapshot.track)}
               onCrossfadeChange={handleCrossfadeChange}
@@ -1240,6 +1332,14 @@ export function DjConsole({
               isEndingSoon={isBEndingSoon}
               playBlockedByFader={playBlockedB}
               loadFlashKey={loadFlashB}
+              cueSpots={liveDeck === "B" ? deckB.cues?.exits : deckB.cues?.entries}
+              flagSec={liveDeck === "B" ? (exitSpotB?.sec ?? null) : (entrySpotB?.sec ?? null)}
+              selectedEntrySpot={liveDeck === "B" ? null : entrySpotB}
+              canStepEntryPrev={entryIdxB > 0}
+              canStepEntryNext={
+                Boolean(deckB.cues) && entryIdxB >= 0 && entryIdxB < (deckB.cues?.entries.length ?? 0) - 1
+              }
+              onStepEntry={liveDeck === "B" ? undefined : handleStepEntryB}
               onPlay={handlePlayB}
               onSoftStop={handleSoftStopB}
               onSeek={handleSeekB}
@@ -1297,6 +1397,16 @@ export function DjConsole({
                   isEndingSoon={isAEndingSoon}
                   playBlockedByFader={playBlockedA}
                   loadFlashKey={loadFlashA}
+                  cueSpots={liveDeck === "A" ? deckA.cues?.exits : deckA.cues?.entries}
+                  flagSec={liveDeck === "A" ? (exitSpotA?.sec ?? null) : (entrySpotA?.sec ?? null)}
+                  selectedEntrySpot={liveDeck === "A" ? null : entrySpotA}
+                  canStepEntryPrev={entryIdxA > 0}
+                  canStepEntryNext={
+                    Boolean(deckA.cues) &&
+                    entryIdxA >= 0 &&
+                    entryIdxA < (deckA.cues?.entries.length ?? 0) - 1
+                  }
+                  onStepEntry={liveDeck === "A" ? undefined : handleStepEntryA}
                   onPlay={handlePlayA}
                   onSoftStop={handleSoftStopA}
                   onSeek={handleSeekA}
@@ -1308,6 +1418,7 @@ export function DjConsole({
                   fadeSeconds={fadeSeconds}
                   mixMode={mixMode}
                   transitionLabel={transitionBadgeLabel}
+                  nextBeatQuality={nextBeatQuality}
                   nextDeck={idleDeck}
                   canAutoFade={Boolean(idleSnapshot.track)}
                   onCrossfadeChange={handleCrossfadeChange}
@@ -1323,6 +1434,16 @@ export function DjConsole({
                   isEndingSoon={isBEndingSoon}
                   playBlockedByFader={playBlockedB}
                   loadFlashKey={loadFlashB}
+                  cueSpots={liveDeck === "B" ? deckB.cues?.exits : deckB.cues?.entries}
+                  flagSec={liveDeck === "B" ? (exitSpotB?.sec ?? null) : (entrySpotB?.sec ?? null)}
+                  selectedEntrySpot={liveDeck === "B" ? null : entrySpotB}
+                  canStepEntryPrev={entryIdxB > 0}
+                  canStepEntryNext={
+                    Boolean(deckB.cues) &&
+                    entryIdxB >= 0 &&
+                    entryIdxB < (deckB.cues?.entries.length ?? 0) - 1
+                  }
+                  onStepEntry={liveDeck === "B" ? undefined : handleStepEntryB}
                   onPlay={handlePlayB}
                   onSoftStop={handleSoftStopB}
                   onSeek={handleSeekB}
