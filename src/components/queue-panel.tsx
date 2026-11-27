@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useRef, useState, type DragEvent } from "react";
 import { AnimatePresence, motion, Reorder, useDragControls } from "framer-motion";
 import {
   Activity,
@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { evaluateBpmFit, type BpmFit, type DeckId } from "@/core/dj-math";
 import type { TrackItem } from "@/lib/audio-engine";
+import { TRACK_DRAG_MIME } from "@/lib/track-drag";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +35,8 @@ interface QueuePanelProps {
   onRemoveAt: (index: number) => void;
   onMove: (fromIndex: number, toIndex: number) => void;
   onClear: () => void;
+  /** A library track dropped into the queue, inserted before `index` (queue length = end). */
+  onDropTrack: (trackId: string, index: number) => void;
 }
 
 function BpmFitPill({ bpm, fit }: { bpm: number | null; fit: BpmFit | null }) {
@@ -84,6 +87,7 @@ function QueueRow({ entry, index, prevBpm, onLoadAt, onRemoveAt }: QueueRowProps
 
   return (
     <Reorder.Item
+      data-queue-row
       value={entry}
       dragListener={false}
       dragControls={dragControls}
@@ -197,7 +201,35 @@ export const QueuePanel = memo(function QueuePanel({
   onLoadAt,
   onRemoveAt,
   onClear,
+  onDropTrack,
 }: QueuePanelProps) {
+  const listRef = useRef<HTMLDivElement>(null);
+  /** Insertion slot under the dragged track, or null when nothing is dragged over. */
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
+
+  const acceptsDrag = (e: DragEvent) => e.dataTransfer.types.includes(TRACK_DRAG_MIME);
+
+  const slotAt = (clientY: number): number => {
+    const rows = listRef.current?.querySelectorAll<HTMLElement>("[data-queue-row]") ?? [];
+    let i = 0;
+    for (const row of rows) {
+      const rect = row.getBoundingClientRect();
+      if (clientY < rect.top + rect.height / 2) return i;
+      i++;
+    }
+    return i;
+  };
+
+  const dropLineTop = (): number => {
+    const rows = listRef.current?.querySelectorAll<HTMLElement>("[data-queue-row]");
+    if (!rows || rows.length === 0 || dropIndex === null) return 0;
+    const listTop = listRef.current?.getBoundingClientRect().top ?? 0;
+    const row = rows[Math.min(dropIndex, rows.length - 1)];
+    if (!row) return 0;
+    const rect = row.getBoundingClientRect();
+    return (dropIndex >= rows.length ? rect.bottom + 3 : rect.top - 3) - listTop;
+  };
+
   const effectiveStagedBpm = stagedBpm ?? stagedTrack?.bpm ?? null;
   const stagedFit =
     liveBpm !== null && stagedTrack
@@ -208,7 +240,28 @@ export const QueuePanel = memo(function QueuePanel({
   return (
     <section
       aria-label="Up Next Queue"
-      className="flex min-h-0 flex-col rounded-xl border border-line bg-card"
+      onDragOver={(e) => {
+        if (!acceptsDrag(e)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        const next = slotAt(e.clientY);
+        if (next !== dropIndex) setDropIndex(next);
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropIndex(null);
+      }}
+      onDrop={(e) => {
+        const id = e.dataTransfer.getData(TRACK_DRAG_MIME);
+        const at = dropIndex ?? queue.length;
+        setDropIndex(null);
+        if (!id) return;
+        e.preventDefault();
+        onDropTrack(id, at);
+      }}
+      className={cn(
+        "flex min-h-0 flex-col rounded-xl border bg-card transition-colors",
+        dropIndex !== null ? "border-brand ring-1 ring-brand/40" : "border-line",
+      )}
     >
       <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
         <div className="flex items-center gap-2">
@@ -273,7 +326,16 @@ export const QueuePanel = memo(function QueuePanel({
           </div>
         )}
 
-        <div className="relative">
+        <div ref={listRef} className="relative">
+          {dropIndex !== null && queue.length > 0 && (
+            <motion.div
+              aria-hidden="true"
+              initial={false}
+              animate={{ top: dropLineTop() }}
+              transition={{ type: "spring", stiffness: 700, damping: 40 }}
+              className="pointer-events-none absolute inset-x-0 z-30 h-0.5 rounded-full bg-brand"
+            />
+          )}
           <Reorder.Group
             axis="y"
             values={queue}
@@ -310,7 +372,10 @@ export const QueuePanel = memo(function QueuePanel({
               <div className="flex size-10 items-center justify-center rounded-xl bg-raised text-faint">
                 <ListMusic className="size-5" />
               </div>
-              <p className="text-xs font-medium text-dim">Queue is empty</p>
+              <p className="text-xs font-medium text-dim">
+                {dropIndex !== null ? "Drop to queue" : "Queue is empty"}
+              </p>
+              <p className="text-[11px] text-faint">Drag songs here from the library</p>
             </motion.div>
           )}
         </div>

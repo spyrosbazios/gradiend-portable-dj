@@ -1042,7 +1042,7 @@ export function DjConsole({
   }, []);
 
   const handleAddToQueue = useCallback(
-    (track: TrackItem, force = false) => {
+    (track: TrackItem, force = false, insertAt?: number) => {
       if (queueRef.current.some((entry) => entry.track.id === track.id)) {
         toast.info(`“${track.title}” is already in the queue`);
         return;
@@ -1062,7 +1062,7 @@ export function DjConsole({
         toast.warning(`“${track.title}” was already played this session`, {
           action: {
             label: "Queue anyway",
-            onClick: () => handleAddToQueue(track, true),
+            onClick: () => handleAddToQueue(track, true, insertAt),
           },
         });
         return;
@@ -1082,7 +1082,10 @@ export function DjConsole({
         return;
       }
       const uid = `q-${++queueSeqRef.current}-${track.id}`;
-      setQueue((prev) => [...prev, { uid, track }]);
+      setQueue((prev) => {
+        const at = insertAt === undefined ? prev.length : Math.min(Math.max(0, insertAt), prev.length);
+        return [...prev.slice(0, at), { uid, track }, ...prev.slice(at)];
+      });
       ensureTrackAnalysis(track);
       toast.success(`Added “${track.title}” to queue`);
     },
@@ -1098,6 +1101,14 @@ export function DjConsole({
       liveSnapshot?.track?.id,
       playedIds,
     ],
+  );
+
+  const handleDropToQueue = useCallback(
+    (trackId: string, index: number) => {
+      const track = tracksRef.current.find((t) => t.id === trackId);
+      if (track) handleAddToQueue(track, false, index);
+    },
+    [handleAddToQueue],
   );
 
   const handleAutoFade = useCallback(() => {
@@ -1457,6 +1468,7 @@ export function DjConsole({
               onRemoveAt={handleRemoveQueueAt}
               onMove={handleMoveQueue}
               onClear={handleClearQueue}
+              onDropTrack={handleDropToQueue}
             />
           </div>
         </main>
@@ -1562,6 +1574,7 @@ export function DjConsole({
                 onRemoveAt={handleRemoveQueueAt}
                 onMove={handleMoveQueue}
                 onClear={handleClearQueue}
+              onDropTrack={handleDropToQueue}
               />
             )}
           </main>
