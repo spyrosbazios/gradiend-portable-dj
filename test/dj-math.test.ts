@@ -21,6 +21,8 @@ import {
   parseFilenameMetadata,
   pickAutoNextTrack,
   planMixTransition,
+  phaseLockRate,
+  barFadeDurationMs,
 } from "@/core/dj-math";
 
 describe("equalPowerGains", () => {
@@ -171,133 +173,152 @@ describe("pickAutoNextTrack", () => {
 });
 
 describe("Smart Mix planner & DSP curves", () => {
-  test("selects sync-bass-swap for close BPMs with tempo match within ±6%", () => {
-    const plan = planMixTransition({
+  const smart = (over: Partial<Parameters<typeof planMixTransition>[0]> = {}) =>
+    planMixTransition({
       mode: "smart",
       fromBpm: 124,
       toBpm: 120,
-      baseDurationMs: 5000,
+      fadeBars: 16,
+      confidence: "high",
+      exitQuality: "good",
+      entryQuality: "good",
+      ...over,
     });
+
+  test("blends close tempos over the chosen bars with a precise sync rate", () => {
+    const plan = smart({ fromBpm: 124.3, toBpm: 120.1 });
     expect(plan.technique).toBe("sync-bass-swap");
-    expect(plan.initialPlaybackRate).toBeCloseTo(124 / 120, 3);
-    expect(plan.echoDelaySec).toBe(0);
+    expect(plan.fadeBars).toBe(16);
+    expect(plan.initialPlaybackRate).toBeCloseTo(124.3 / 120.1, 5);
+    expect(plan.tempoMultiplier).toBe(1);
+    expect(plan.durationMs).toBe(Math.round(16 * (240 / 124.3) * 1000));
   });
 
-  test("selects filter-sweep for moderate BPM shift", () => {
-    const plan = planMixTransition({
-      mode: "smart",
-      fromBpm: 120,
-      toBpm: 132,
-      baseDurationMs: 5000,
-    });
-    expect(plan.technique).toBe("filter-sweep");
+  test("syncs half-time tracks with a tempo multiplier of 2", () => {
+    const plan = smart({ fromBpm: 128, toBpm: 64 });
+    expect(plan.technique).toBe("sync-bass-swap");
+    expect(plan.tempoMultiplier).toBe(2);
     expect(plan.initialPlaybackRate).toBe(1);
-    expect(plan.durationMs).toBe(5000);
   });
 
-  test("selects BPM-synced echo-out for big BPM clashes", () => {
-    const plan = planMixTransition({
-      mode: "smart",
-      fromBpm: 120,
-      toBpm: 92,
-      baseDurationMs: 5000,
-    });
-    expect(plan.technique).toBe("echo-out");
-    expect(plan.durationMs).toBeLessThanOrEqual(2600);
-    expect(plan.echoDelaySec).toBeCloseTo(0.375, 3); // dotted-eighth at 120 BPM
+  test("a risky spot shortens the blend to 4 bars instead of an echo", () => {
+    for (const over of [{ exitQuality: "risky" as const }, { entryQuality: "risky" as const }]) {
+      const plan = smart(over);
+      expect(plan.technique).toBe("sync-bass-swap");
+      expect(plan.fadeBars).toBe(4);
+    }
   });
 
-  test("respects explicit bass-swap and classic overrides", () => {
-    expect(
-      planMixTransition({ mode: "bass-swap", fromBpm: 90, toBpm: 140, baseDurationMs: 5000 })
-        .technique,
-    ).toBe("bass-swap");
-    expect(
-      planMixTransition({ mode: "classic", fromBpm: 120, toBpm: 122, baseDurationMs: 5000 })
-        .technique,
-    ).toBe("classic");
+  test("echo-out only for tempo clashes, low confidence or unknown tempo", () => {
+    for (const over of [
+      { toBpm: 92 },
+      { confidence: "low" as const },
+      { fromBpm: null },
+    ]) {
+      const plan = smart(over);
+      expect(plan.technique).toBe("echo-out");
+      expect(plan.fadeBars).toBe(2);
+    }
+    expect(smart({ fromBpm: 120, toBpm: 92 }).echoDelaySec).toBeCloseTo(0.375, 3);
   });
 
-  test("bass-swap cuts incoming bass before midpoint and swaps cleanly after", () => {
-    const start = computeTransitionDsp("sync-bass-swap", 0.2);
-    const end = computeTransitionDsp("sync-bass-swap", 0.8);
-    expect(start.outgoing.bassDb).toBeCloseTo(0, 1);
-    expect(start.incoming.bassDb).toBeLessThan(-15);
-    expect(end.outgoing.bassDb).toBeLessThan(-15);
-    expect(end.incoming.bassDb).toBeCloseTo(0, 1);
+  test("moderate tempo gaps filter-sweep over at most 8 bars, unsynced", () => {
+    const plan = smart({ fromBpm: 120, toBpm: 132, fadeBars: 32 });
+    expect(plan.technique).toBe("filter-sweep");
+    expect(plan.fadeBars).toBe(8);
+    expect(plan.initialPlaybackRate).toBe(1);
+    expect(plan.tempoMultiplier).toBeNull();
+  });
+
+  test("never plans a mix longer than the outgoing track has left, in even bars", () => {
+    expect(smart({ fadeBars: 32, barsAvailable: 19.7 }).fadeBars).toBe(18);
+    expect(smart({ fadeBars: 8, barsAvailable: 40 }).fadeBars).toBe(8);
+    expect(smart({ fadeBars: 16, barsAvailable: 1 }).fadeBars).toBe(2);
+  });
+
+  test("respects explicit bass-swap and classic modes with the chosen bars", () => {
+    const swap = planMixTransition({ mode: "bass-swap", fromBpm: 90, toBpm: 140, fadeBars: 8 });
+    expect(swap.technique).toBe("bass-swap");
+    expect(swap.fadeBars).toBe(8);
+    const classic = planMixTransition({ mode: "classic", fromBpm: null, toBpm: 122, fadeBars: 8 });
+    expect(classic.technique).toBe("classic");
+    expect(classic.durationMs).toBe(barFadeDurationMs(null, 8));
+  });
+
+  test("bass swap: incoming reaches full volume early, outgoing holds until the swap", () => {
+    const early = computeTransitionDsp("sync-bass-swap", 0.4, 16);
+    expect(early.incoming.gain).toBeCloseTo(1, 3);
+    expect(early.outgoing.gain).toBeCloseTo(1, 3);
+    expect(early.incoming.bassDb).toBeLessThan(-19);
+    expect(early.outgoing.bassDb).toBeCloseTo(0, 3);
+
+    const quarter = computeTransitionDsp("sync-bass-swap", 0.2, 16);
+    expect(quarter.incoming.gain).toBeGreaterThan(0.6);
+    expect(quarter.incoming.gain).toBeLessThan(0.8);
+
+    const end = computeTransitionDsp("sync-bass-swap", 1, 16);
+    expect(end.outgoing.gain).toBeCloseTo(0, 3);
+    expect(end.incoming.gain).toBeCloseTo(1, 3);
+  });
+
+  test("bass swap happens within one beat starting on the middle bar line", () => {
+    const bars = 16;
+    const beat = 1 / (4 * bars);
+    const before = computeTransitionDsp("sync-bass-swap", 0.5 - 0.001, bars);
+    const after = computeTransitionDsp("sync-bass-swap", 0.5 + beat, bars);
+    expect(before.incoming.bassDb).toBeLessThan(-19.9);
+    expect(before.outgoing.bassDb).toBeCloseTo(0, 2);
+    expect(after.incoming.bassDb).toBeCloseTo(0, 3);
+    expect(after.outgoing.bassDb).toBeCloseTo(-20, 3);
   });
 
   test("echo-out feeds echo early then cuts send so delay decays cleanly", () => {
-    const peak = computeTransitionDsp("echo-out", 0.35);
-    const tail = computeTransitionDsp("echo-out", 0.8);
+    const peak = computeTransitionDsp("echo-out", 0.35, 2);
+    const tail = computeTransitionDsp("echo-out", 0.8, 2);
     expect(peak.outgoing.echoSend).toBeGreaterThan(0.4);
     expect(tail.outgoing.echoSend).toBeCloseTo(0, 4);
     expect(tail.incoming.gain).toBeCloseTo(1, 3);
     expect(tail.incoming.bassDb).toBe(0);
   });
+});
 
-  test("forces echo-out when confidence is low or exit/entry quality is risky", () => {
-    const lowConf = planMixTransition({
-      mode: "smart",
-      fromBpm: 124,
-      toBpm: 124,
-      baseDurationMs: 5000,
-      confidence: "low",
-      exitQuality: "good",
-      entryQuality: "good",
+describe("Phase lock", () => {
+  const grid = { bpm: 120, firstDownbeatSec: 0 }; // beat = 0.5 s
+  const lock = (inTimeSec: number, outTimeSec = 10, inGrid = grid, tempoMultiplier = 1) =>
+    phaseLockRate({
+      baseRate: 1.02,
+      tempoMultiplier,
+      outGrid: grid,
+      outTimeSec,
+      outRate: 1,
+      inGrid,
+      inTimeSec,
     });
-    expect(lowConf.technique).toBe("echo-out");
-    expect(lowConf.fadeBars).toBeNull();
 
-    const riskyExit = planMixTransition({
-      mode: "smart",
-      fromBpm: 124,
-      toBpm: 124,
-      baseDurationMs: 5000,
-      confidence: "high",
-      exitQuality: "risky",
-      entryQuality: "good",
-    });
-    expect(riskyExit.technique).toBe("echo-out");
-
-    const riskyEntry = planMixTransition({
-      mode: "smart",
-      fromBpm: 124,
-      toBpm: 124,
-      baseDurationMs: 5000,
-      confidence: "high",
-      exitQuality: "good",
-      entryQuality: "risky",
-    });
-    expect(riskyEntry.technique).toBe("echo-out");
+  test("leaves the rate alone when beats line up or the offset is within jitter", () => {
+    expect(lock(20).rate).toBe(1.02);
+    expect(lock(20.004).rate).toBe(1.02);
   });
 
-  test("computes 8-bar or 16-bar beat-gridded fade duration from outgoing BPM", () => {
-    const goodPair = planMixTransition({
-      mode: "smart",
-      fromBpm: 120,
-      toBpm: 122,
-      baseDurationMs: 5000,
-      confidence: "high",
-      exitQuality: "good",
-      entryQuality: "good",
-    });
-    expect(goodPair.technique).toBe("sync-bass-swap");
-    expect(goodPair.fadeBars).toBe(16);
-    expect(goodPair.durationMs).toBe(32000); // 16 bars at 120 BPM = 32s
+  test("slows an incoming deck that is ahead and speeds one that is behind", () => {
+    const ahead = lock(20.012);
+    expect(ahead.offsetSec).toBeCloseTo(0.012, 4);
+    expect(ahead.rate).toBeCloseTo(1.02 * (1 - 0.006), 5);
+    const behind = lock(19.97);
+    expect(behind.offsetSec).toBeCloseTo(-0.03, 4);
+    expect(behind.rate).toBeGreaterThan(1.02);
+  });
 
-    const okPair = planMixTransition({
-      mode: "smart",
-      fromBpm: 120,
-      toBpm: 122,
-      baseDurationMs: 5000,
-      confidence: "high",
-      exitQuality: "ok",
-      entryQuality: "good",
-    });
-    expect(okPair.technique).toBe("sync-bass-swap");
-    expect(okPair.fadeBars).toBe(8);
-    expect(okPair.durationMs).toBe(16000); // 8 bars at 120 BPM = 16s
+  test("caps the nudge at ±1% and wraps offsets to the nearest beat", () => {
+    expect(lock(20.2).rate).toBeCloseTo(1.02 * 0.99, 6);
+    // 0.45 s ahead is really 0.05 s behind the next beat
+    expect(lock(20.45).offsetSec).toBeCloseTo(-0.05, 4);
+  });
+
+  test("compares half-time incoming tracks in outgoing beats", () => {
+    const half = { bpm: 60, firstDownbeatSec: 0 };
+    expect(lock(7.5, 10, half, 2).offsetSec).toBeCloseTo(0, 6);
+    expect(lock(7.52, 10, half, 2).offsetSec).toBeCloseTo(0.02, 4);
   });
 });
 

@@ -31,6 +31,9 @@ import {
   isDeckFadedOut,
   pickAutoNextTrack,
   planMixTransition,
+  barFadeDurationMs,
+  mixTempo,
+  type FadeBars,
   type DeckId,
   type MixMode,
   type SpotQuality,
@@ -123,7 +126,7 @@ export function DjConsole({
   const [savedFolderName, setSavedFolderName] = useState<string | null>(null);
   const [queue, setQueue] = useState<QueueEntry[]>([]);
   const [autoPlayEnabled, setAutoPlayEnabled] = useState(true);
-  const [fadeSeconds, setFadeSeconds] = useState(5);
+  const [fadeBars, setFadeBars] = useState<FadeBars>(16);
   const [mixMode, setMixMode] = useState<MixMode>(readInitialMixMode);
 
   useEffect(() => {
@@ -321,7 +324,7 @@ export function DjConsole({
         mode: "classic",
         fromBpm: null,
         toBpm: idleSnapshot.bpm ?? idleSnapshot.track.bpm,
-        baseDurationMs: fadeSeconds * 1000,
+        fadeBars,
       });
     }
     const liveCues = liveSnapshot.cues;
@@ -337,11 +340,17 @@ export function DjConsole({
         : liveCues?.confidence === "low" || idleCues?.confidence === "low"
           ? "low"
           : undefined;
+    const fromBpm = mixTempo(liveCues, liveSnapshot.bpm ?? liveSnapshot.track?.bpm ?? null);
+    const mixStartSec = liveExitSpot?.sec ?? liveSnapshot.currentTime;
     return planMixTransition({
       mode: mixMode,
-      fromBpm: liveSnapshot.bpm ?? liveSnapshot.track?.bpm ?? null,
-      toBpm: idleSnapshot.bpm ?? idleSnapshot.track.bpm,
-      baseDurationMs: fadeSeconds * 1000,
+      fromBpm,
+      toBpm: mixTempo(idleCues, idleSnapshot.bpm ?? idleSnapshot.track.bpm),
+      fadeBars,
+      barsAvailable:
+        liveSnapshot.duration > 0
+          ? (liveSnapshot.duration - mixStartSec) / (barFadeDurationMs(fromBpm, 1) / 1000)
+          : undefined,
       confidence,
       exitQuality: liveExitSpot?.quality ?? null,
       entryQuality: idleEntrySpot?.quality ?? null,
@@ -355,9 +364,12 @@ export function DjConsole({
     liveSnapshot?.bpm,
     liveSnapshot?.track?.bpm,
     liveSnapshot?.cues,
+    liveSnapshot?.duration,
+    liveSnapshot?.currentTime,
     liveExitSpot?.quality,
+    liveExitSpot?.sec,
     mixMode,
-    fadeSeconds,
+    fadeBars,
   ]);
 
   const transitionBadgeLabel = useMemo(() => {
@@ -723,7 +735,7 @@ export function DjConsole({
 
     const plannedFadeSec = upcomingTransitionPlan
       ? upcomingTransitionPlan.durationMs / 1000
-      : fadeSeconds;
+      : barFadeDurationMs(liveSnapshot.bpm, fadeBars) / 1000;
 
     let timeToMix: number;
     let triggerKey: string;
@@ -785,7 +797,7 @@ export function DjConsole({
       void djEngine
         .startAutoFade(
           idleDeck,
-          fadeSeconds * 1000,
+          fadeBars,
           (oldDeck) => {
             autoFadeTriggeredForRef.current = null;
             autoPickTriggeredForRef.current = null;
@@ -814,7 +826,7 @@ export function DjConsole({
     queue.length,
     tracks,
     playedIds,
-    fadeSeconds,
+    fadeBars,
     mixMode,
     upcomingTransitionPlan,
     flashDeck,
@@ -1041,7 +1053,7 @@ export function DjConsole({
     void djEngine
       .startAutoFade(
         idleDeck,
-        fadeSeconds * 1000,
+        fadeBars,
         (oldDeck) => {
           autoFadeTriggeredForRef.current = null;
           autoPickTriggeredForRef.current = null;
@@ -1054,7 +1066,7 @@ export function DjConsole({
           toast.error(`Could not play “${targetTitle}”. The audio file may be unreadable.`);
         }
       });
-  }, [idleDeck, idleSnapshot.track, isAutoFading, fadeSeconds, mixMode, retireDeck]);
+  }, [idleDeck, idleSnapshot.track, isAutoFading, fadeBars, mixMode, retireDeck]);
 
   // Solo Shift tap triggers Fade to Next even while searching (still ignored if combined with another key)
   useEffect(() => {
@@ -1313,7 +1325,7 @@ export function DjConsole({
             <CrossfaderPanel
               crossfade={crossfade}
               isAutoFading={isAutoFading}
-              fadeSeconds={fadeSeconds}
+              fadeBars={fadeBars}
               mixMode={mixMode}
               transitionLabel={transitionBadgeLabel}
               nextBeatQuality={nextBeatQuality}
@@ -1321,7 +1333,7 @@ export function DjConsole({
               canAutoFade={Boolean(idleSnapshot.track)}
               onCrossfadeChange={handleCrossfadeChange}
               onAutoFade={handleAutoFade}
-              onFadeSecondsChange={setFadeSeconds}
+              onFadeBarsChange={setFadeBars}
               onMixModeChange={setMixMode}
             />
             <DeckCard
@@ -1415,7 +1427,7 @@ export function DjConsole({
                 <CrossfaderPanel
                   crossfade={crossfade}
                   isAutoFading={isAutoFading}
-                  fadeSeconds={fadeSeconds}
+                  fadeBars={fadeBars}
                   mixMode={mixMode}
                   transitionLabel={transitionBadgeLabel}
                   nextBeatQuality={nextBeatQuality}
@@ -1423,7 +1435,7 @@ export function DjConsole({
                   canAutoFade={Boolean(idleSnapshot.track)}
                   onCrossfadeChange={handleCrossfadeChange}
                   onAutoFade={handleAutoFade}
-                  onFadeSecondsChange={setFadeSeconds}
+                  onFadeBarsChange={setFadeBars}
                   onMixModeChange={setMixMode}
                 />
                 <DeckCard

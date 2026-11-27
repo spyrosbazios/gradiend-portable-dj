@@ -1,4 +1,5 @@
 import {
+  barFadeDurationMs,
   computeTransitionDsp,
   computeWaveformAndAutoGain,
   equalPowerGains,
@@ -6,9 +7,12 @@ import {
   getActiveExitSpot,
   getExitQualityAtTime,
   getNextBeatOneSec,
+  mixTempo,
+  phaseLockRate,
   planMixTransition,
   TRACK_CUES_VERSION,
   type DeckId,
+  type FadeBars,
   type MixMode,
   type TrackCues,
 } from "@/core/dj-math";
@@ -80,6 +84,9 @@ function emptyDeck(): DeckSnapshot {
     waveformLocked: false,
   };
 }
+
+/** How often the phase lock re-measures the beat offset during a blend. */
+const PHASE_LOCK_INTERVAL_MS = 250;
 
 export class DjAudioEngine {
   private ctx: AudioContext | null = null;
@@ -756,7 +763,7 @@ export class DjAudioEngine {
 
   async startAutoFade(
     targetDeck: DeckId,
-    durationMs = 5000,
+    fadeBars: FadeBars,
     onComplete?: (finishedOldDeck: DeckId) => void,
     modeOverride?: MixMode,
   ): Promise<boolean> {
@@ -823,11 +830,24 @@ export class DjAudioEngine {
     // If the outgoing deck isn't actually playing, do a clean classic bring-in
     const effectiveMode: MixMode = !oldPlaying ? "classic" : (modeOverride ?? this.mixMode);
 
+    const fromTempo = mixTempo(
+      oldCues,
+      oldInternals.snapshot.bpm ?? oldInternals.snapshot.track?.bpm ?? null,
+    );
+    const mixStartSec = targetBarSec ?? oldInternals.audio.currentTime;
+    const oldDuration = oldInternals.snapshot.duration || oldInternals.audio.duration || 0;
     const plan = planMixTransition({
       mode: effectiveMode,
-      fromBpm: oldInternals.snapshot.bpm ?? oldInternals.snapshot.track?.bpm ?? null,
-      toBpm: targetInternals.snapshot.bpm ?? targetInternals.snapshot.track?.bpm ?? null,
-      baseDurationMs: durationMs,
+      barsAvailable:
+        oldPlaying && oldDuration > 0
+          ? (oldDuration - mixStartSec) / (barFadeDurationMs(fromTempo, 1) / 1000)
+          : undefined,
+      fromBpm: fromTempo,
+      toBpm: mixTempo(
+        targetCues,
+        targetInternals.snapshot.bpm ?? targetInternals.snapshot.track?.bpm ?? null,
+      ),
+      fadeBars,
       confidence: combinedConfidence,
       exitQuality,
       entryQuality,
@@ -887,7 +907,7 @@ export class DjAudioEngine {
       if (plan.echoDelaySec > 0 && oldInternals.echoDelayNode) {
         oldInternals.echoDelayNode.delayTime.setValueAtTime(plan.echoDelaySec, now);
       }
-      const initialDsp = computeTransitionDsp(plan.technique, 0);
+      const initialDsp = computeTransitionDsp(plan.technique, 0, plan.fadeBars);
       if (targetInternals.bassFilterNode) {
         targetInternals.bassFilterNode.gain.setValueAtTime(initialDsp.incoming.bassDb, now);
       }
@@ -923,15 +943,34 @@ export class DjAudioEngine {
     const startOutGain = oldDeck === "A" ? startGains.gainA : startGains.gainB;
     const startInGain = targetDeck === "A" ? startGains.gainA : startGains.gainB;
 
+    // Phase lock keeps the incoming beats on the outgoing beats for the whole blend.
+    const inGrid = targetCues?.grid ?? null;
+    const lockGrids =
+      plan.tempoMultiplier !== null && oldGrid && inGrid
+        ? { outGrid: oldGrid, inGrid, tempoMultiplier: plan.tempoMultiplier }
+        : null;
+    let lastLockAt = startTime;
+
     const step = (now: number) => {
       if (seq !== this.fadeSeq) return;
       const t = Math.min(1, (now - startTime) / fadeDurationMs);
       const eased = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
       this.crossfade = startVal + (endVal - startVal) * eased;
 
+      if (lockGrids && now - lastLockAt >= PHASE_LOCK_INTERVAL_MS && !oldInternals.audio.paused) {
+        lastLockAt = now;
+        targetInternals.audio.playbackRate = phaseLockRate({
+          baseRate: plan.initialPlaybackRate,
+          ...lockGrids,
+          outTimeSec: oldInternals.audio.currentTime,
+          outRate: oldInternals.audio.playbackRate || 1,
+          inTimeSec: targetInternals.audio.currentTime,
+        }).rate;
+      }
+
       if (this.ctx) {
         const audioNow = this.ctx.currentTime;
-        const { outgoing, incoming } = computeTransitionDsp(plan.technique, t);
+        const { outgoing, incoming } = computeTransitionDsp(plan.technique, t, plan.fadeBars);
         const outGain = startOutGain * outgoing.gain;
         const inGain = startInGain + (1 - startInGain) * incoming.gain;
 
@@ -977,7 +1016,7 @@ export class DjAudioEngine {
         this.resetDeckDsp(oldDeck, 0.04);
         oldInternals.audio.pause();
         oldInternals.audio.playbackRate = 1;
-        if (plan.initialPlaybackRate !== 1) {
+        if (targetInternals.audio.playbackRate !== 1) {
           this.glideTempoToNatural(targetDeck, 3500);
         }
         targetInternals.snapshot = {
