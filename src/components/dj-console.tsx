@@ -289,9 +289,6 @@ export function DjConsole({
   const isBEndingSoon =
     deckB.isPlaying && deckB.duration > 30 && deckB.duration - deckB.currentTime <= 30;
 
-  const anyDeckPlaying = deckA.isPlaying || deckB.isPlaying;
-  const playBlockedA = anyDeckPlaying && isDeckFadedOut("A", crossfade);
-  const playBlockedB = anyDeckPlaying && isDeckFadedOut("B", crossfade);
   const { gainA, gainB } = equalPowerGains(crossfade);
   const audibilityA = deckA.isPlaying ? gainA : 0;
   const audibilityB = deckB.isPlaying ? gainB : 0;
@@ -431,6 +428,15 @@ export function DjConsole({
       ? deckB.cues.entries.findIndex((s) => s.bar === entrySpotB.bar)
       : -1;
 
+  const canStepPrevA = deckA.cues?.entries.length ? entryIdxA > 0 : deckA.currentTime > 0;
+  const canStepNextA = deckA.cues?.entries.length
+    ? entryIdxA >= 0 && entryIdxA < deckA.cues.entries.length - 1
+    : deckA.duration > 0;
+  const canStepPrevB = deckB.cues?.entries.length ? entryIdxB > 0 : deckB.currentTime > 0;
+  const canStepNextB = deckB.cues?.entries.length
+    ? entryIdxB >= 0 && entryIdxB < deckB.cues.entries.length - 1
+    : deckB.duration > 0;
+
   const exitSpotA = useMemo(
     () => (liveDeck === "A" ? getActiveExitSpot(deckA.cues, deckA.currentTime) : null),
     [liveDeck, deckA.cues, deckA.currentTime],
@@ -447,11 +453,11 @@ export function DjConsole({
 
       if (fadedOut) {
         if (otherPlaying) {
-          toast.info(`Crossfader is on Deck ${id === "A" ? "B" : "A"} — tap Shift to fade to Deck ${id}.`);
-          return;
+          toast.info(`Deck ${id} starts muted — move the crossfader or tap Shift to bring it in.`);
+        } else {
+          // Nothing is playing: automatically route crossfader to the deck the user wants to start
+          djEngine.setCrossfade(id === "A" ? 0 : 1, false);
         }
-        // Nothing is playing: automatically route crossfader to the deck the user wants to start
-        djEngine.setCrossfade(id === "A" ? 0 : 1, false);
       }
 
       void djEngine.play(id).then((ok) => {
@@ -586,7 +592,7 @@ export function DjConsole({
       if (inInput) return;
       if (target?.getAttribute("role") === "slider") return;
 
-      if (isAutoFading || !idleSnapshot.track || !idleSnapshot.cues) return;
+      if (isAutoFading || !idleSnapshot.track) return;
       e.preventDefault();
       const stepHandler = idleDeck === "A" ? handleStepEntryA : handleStepEntryB;
       stepHandler(e.key === "ArrowRight" ? 1 : -1);
@@ -598,7 +604,6 @@ export function DjConsole({
     isAutoFading,
     idleDeck,
     idleSnapshot.track,
-    idleSnapshot.cues,
     handleStepEntryA,
     handleStepEntryB,
   ]);
@@ -1316,15 +1321,11 @@ export function DjConsole({
               keyFit={idleDeck === "A" ? nextKeyFit : null}
               audibility={audibilityA}
               isEndingSoon={isAEndingSoon}
-              playBlockedByFader={playBlockedA}
               loadFlashKey={loadFlashA}
               cueSpots={liveDeck === "A" ? deckA.cues?.exits : deckA.cues?.entries}
               flagSec={liveDeck === "A" ? (exitSpotA?.sec ?? null) : (entrySpotA?.sec ?? null)}
-              selectedEntrySpot={liveDeck === "A" ? null : entrySpotA}
-              canStepEntryPrev={entryIdxA > 0}
-              canStepEntryNext={
-                Boolean(deckA.cues) && entryIdxA >= 0 && entryIdxA < (deckA.cues?.entries.length ?? 0) - 1
-              }
+              canStepEntryPrev={canStepPrevA}
+              canStepEntryNext={canStepNextA}
               onStepEntry={liveDeck === "A" ? undefined : handleStepEntryA}
               onPlay={handlePlayA}
               onSoftStop={handleSoftStopA}
@@ -1352,15 +1353,11 @@ export function DjConsole({
               keyFit={idleDeck === "B" ? nextKeyFit : null}
               audibility={audibilityB}
               isEndingSoon={isBEndingSoon}
-              playBlockedByFader={playBlockedB}
               loadFlashKey={loadFlashB}
               cueSpots={liveDeck === "B" ? deckB.cues?.exits : deckB.cues?.entries}
               flagSec={liveDeck === "B" ? (exitSpotB?.sec ?? null) : (entrySpotB?.sec ?? null)}
-              selectedEntrySpot={liveDeck === "B" ? null : entrySpotB}
-              canStepEntryPrev={entryIdxB > 0}
-              canStepEntryNext={
-                Boolean(deckB.cues) && entryIdxB >= 0 && entryIdxB < (deckB.cues?.entries.length ?? 0) - 1
-              }
+              canStepEntryPrev={canStepPrevB}
+              canStepEntryNext={canStepNextB}
               onStepEntry={liveDeck === "B" ? undefined : handleStepEntryB}
               onPlay={handlePlayB}
               onSoftStop={handleSoftStopB}
@@ -1418,17 +1415,11 @@ export function DjConsole({
                   keyFit={idleDeck === "A" ? nextKeyFit : null}
                   audibility={audibilityA}
                   isEndingSoon={isAEndingSoon}
-                  playBlockedByFader={playBlockedA}
                   loadFlashKey={loadFlashA}
                   cueSpots={liveDeck === "A" ? deckA.cues?.exits : deckA.cues?.entries}
                   flagSec={liveDeck === "A" ? (exitSpotA?.sec ?? null) : (entrySpotA?.sec ?? null)}
-                  selectedEntrySpot={liveDeck === "A" ? null : entrySpotA}
-                  canStepEntryPrev={entryIdxA > 0}
-                  canStepEntryNext={
-                    Boolean(deckA.cues) &&
-                    entryIdxA >= 0 &&
-                    entryIdxA < (deckA.cues?.entries.length ?? 0) - 1
-                  }
+                  canStepEntryPrev={canStepPrevA}
+              canStepEntryNext={canStepNextA}
                   onStepEntry={liveDeck === "A" ? undefined : handleStepEntryA}
                   onPlay={handlePlayA}
                   onSoftStop={handleSoftStopA}
@@ -1456,17 +1447,11 @@ export function DjConsole({
                   keyFit={idleDeck === "B" ? nextKeyFit : null}
                   audibility={audibilityB}
                   isEndingSoon={isBEndingSoon}
-                  playBlockedByFader={playBlockedB}
                   loadFlashKey={loadFlashB}
                   cueSpots={liveDeck === "B" ? deckB.cues?.exits : deckB.cues?.entries}
                   flagSec={liveDeck === "B" ? (exitSpotB?.sec ?? null) : (entrySpotB?.sec ?? null)}
-                  selectedEntrySpot={liveDeck === "B" ? null : entrySpotB}
-                  canStepEntryPrev={entryIdxB > 0}
-                  canStepEntryNext={
-                    Boolean(deckB.cues) &&
-                    entryIdxB >= 0 &&
-                    entryIdxB < (deckB.cues?.entries.length ?? 0) - 1
-                  }
+                  canStepEntryPrev={canStepPrevB}
+              canStepEntryNext={canStepNextB}
                   onStepEntry={liveDeck === "B" ? undefined : handleStepEntryB}
                   onPlay={handlePlayB}
                   onSoftStop={handleSoftStopB}

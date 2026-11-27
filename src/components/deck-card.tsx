@@ -27,11 +27,9 @@ interface DeckCardProps {
   keyFit: KeyFit | null;
   audibility: number;
   isEndingSoon: boolean;
-  playBlockedByFader: boolean;
   loadFlashKey: number;
   cueSpots?: CueSpot[];
   flagSec?: number | null;
-  selectedEntrySpot?: CueSpot | null;
   canStepEntryPrev?: boolean;
   canStepEntryNext?: boolean;
   onStepEntry?: (delta: -1 | 1) => void;
@@ -41,16 +39,6 @@ interface DeckCardProps {
   onToggleLock: () => void;
 }
 
-function formatEntryVerdict(spot: CueSpot): string {
-  const prefix =
-    spot.quality === "good"
-      ? "Good entry"
-      : spot.quality === "risky"
-        ? "Risky entry"
-        : "Ok entry";
-  return `${prefix} · ${spot.reason}`;
-}
-
 export const DeckCard = memo(function DeckCard({
   deckId,
   deck,
@@ -58,11 +46,9 @@ export const DeckCard = memo(function DeckCard({
   keyFit,
   audibility,
   isEndingSoon,
-  playBlockedByFader,
   loadFlashKey,
   cueSpots,
   flagSec,
-  selectedEntrySpot,
   canStepEntryPrev = false,
   canStepEntryNext = false,
   onStepEntry,
@@ -295,75 +281,53 @@ export const DeckCard = memo(function DeckCard({
         onSeek={onSeek}
       />
 
-      {!isLive && deck.track && selectedEntrySpot && onStepEntry && (
-        <div
-          aria-label="Entry phrase selector"
-          className="relative flex items-center gap-1.5"
-        >
-          <Button
-            size="icon-xs"
-            variant="outline"
-            disabled={!canStepEntryPrev}
-            onClick={() => onStepEntry(-1)}
-            aria-label="Previous entry phrase"
-            title="Previous entry phrase (Left Arrow)"
-          >
-            <ChevronLeft className="size-3.5" />
-          </Button>
-
-          <div
-            className={cn(
-              "min-w-0 flex-1 truncate rounded-md border px-2 py-1 text-center text-xs font-medium",
-              selectedEntrySpot.quality === "good" &&
-                "border-up-subtle bg-up-soft text-up",
-              selectedEntrySpot.quality === "ok" &&
-                "border-warn-subtle bg-warn-soft text-warn",
-              selectedEntrySpot.quality === "risky" &&
-                "border-down-subtle bg-down-soft text-down",
-            )}
-            title={formatEntryVerdict(selectedEntrySpot)}
-          >
-            {formatEntryVerdict(selectedEntrySpot)}
-          </div>
-
-          <Button
-            size="icon-xs"
-            variant="outline"
-            disabled={!canStepEntryNext}
-            onClick={() => onStepEntry(1)}
-            aria-label="Next entry phrase"
-            title="Next entry phrase (Right Arrow)"
-          >
-            <ChevronRight className="size-3.5" />
-          </Button>
-        </div>
-      )}
-
-      {(isLive || !selectedEntrySpot || !playBlockedByFader || deck.isPlaying) && (
-        <div className="relative flex min-h-8 items-center justify-between gap-2">
-          <div>
-            {deck.track && (deck.isPlaying || !playBlockedByFader) && (
+      {deck.track && (
+        <div className="relative flex min-h-9 items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5">
+            {!isLive && onStepEntry && (
               <Button
-                size="sm"
-                onClick={deck.isPlaying ? onSoftStop : onPlay}
-                variant={deck.isPlaying ? "secondary" : "default"}
-                className={cn(
-                  "min-w-28 font-semibold",
-                  !deck.isPlaying && isA && "bg-deck-a text-bg hover:bg-deck-a/90",
-                  !deck.isPlaying && !isA && "bg-deck-b text-bg hover:bg-deck-b/90",
-                )}
+                size="icon-sm"
+                variant="outline"
+                disabled={!canStepEntryPrev}
+                onClick={() => onStepEntry(-1)}
+                aria-label="Previous entry point"
+                title="Previous entry point (Left Arrow)"
               >
-                {deck.isPlaying ? (
-                  <>
-                    <Square className="size-3.5 fill-current" />
-                    Stop
-                  </>
-                ) : (
-                  <>
-                    <Play className="size-3.5 fill-current" />
-                    Play
-                  </>
-                )}
+                <ChevronLeft className="size-4" />
+              </Button>
+            )}
+            <Button
+              size="sm"
+              onClick={deck.isPlaying ? onSoftStop : onPlay}
+              variant={deck.isPlaying ? "secondary" : "default"}
+              className={cn(
+                "min-w-24 font-semibold",
+                !deck.isPlaying && isA && "bg-deck-a text-bg hover:bg-deck-a/90",
+                !deck.isPlaying && !isA && "bg-deck-b text-bg hover:bg-deck-b/90",
+              )}
+            >
+              {deck.isPlaying ? (
+                <>
+                  <Square className="size-3.5 fill-current" />
+                  Stop
+                </>
+              ) : (
+                <>
+                  <Play className="size-3.5 fill-current" />
+                  Play
+                </>
+              )}
+            </Button>
+            {!isLive && onStepEntry && (
+              <Button
+                size="icon-sm"
+                variant="outline"
+                disabled={!canStepEntryNext}
+                onClick={() => onStepEntry(1)}
+                aria-label="Next entry point"
+                title="Next entry point (Right Arrow)"
+              >
+                <ChevronRight className="size-4" />
               </Button>
             )}
           </div>

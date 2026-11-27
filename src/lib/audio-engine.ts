@@ -635,7 +635,12 @@ export class DjAudioEngine {
   stepSelectedEntry(id: DeckId, delta: -1 | 1): void {
     const d = this.decks[id];
     const entries = d.snapshot.cues?.entries;
-    if (!entries || entries.length === 0) return;
+    if (!entries || entries.length === 0) {
+      // No analysed entry phrases: step the cue position by one 8-bar phrase instead.
+      const bpm = d.snapshot.bpm ?? d.snapshot.track?.bpm ?? null;
+      this.seekBySeconds(id, (delta * barFadeDurationMs(bpm, 8)) / 1000);
+      return;
+    }
 
     const currentBar = d.snapshot.selectedEntryBar ?? d.snapshot.cues?.bestEntryBar ?? 0;
     const currIdx = Math.max(

@@ -1,4 +1,5 @@
-import { memo } from "react";
+import { memo, useCallback, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+import { motion } from "framer-motion";
 import { ArrowLeft, ArrowLeftRight, ArrowRight, Sparkles } from "lucide-react";
 import {
   FADE_BAR_OPTIONS,
@@ -9,7 +10,6 @@ import {
 } from "@/core/dj-math";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Slider } from "@/components/ui/slider";
 
 interface CrossfaderPanelProps {
   crossfade: number;
@@ -44,6 +44,150 @@ const MIX_MODES: ReadonlyArray<{ id: MixMode; label: string; title: string }> = 
     title: "Pure equal-power volume crossfade",
   },
 ];
+
+/** Values within this distance of a detent (A, centre, B) snap onto it while dragging. */
+const SNAP = 0.035;
+const DETENTS = [0, 0.5, 1] as const;
+
+function snap(v: number): number {
+  const clamped = Math.min(1, Math.max(0, v));
+  for (const d of DETENTS) if (Math.abs(clamped - d) <= SNAP) return d;
+  return clamped;
+}
+
+interface CrossfaderControlProps {
+  value: number;
+  isAutoFading: boolean;
+  onChange: (val: number) => void;
+}
+
+/**
+ * Touch-first crossfader. Grabbing the cap drags it relative to the finger (no jump);
+ * tapping the track glides the cap there; double-tap centres it. Snaps to A / centre / B.
+ */
+function CrossfaderControl({ value, isAutoFading, onChange }: CrossfaderControlProps) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const drag = useRef<{ pointerId: number; offset: number } | null>(null);
+  const lastTap = useRef(0);
+  const [dragging, setDragging] = useState(false);
+
+  const ratioAt = useCallback((clientX: number): number => {
+    const rect = trackRef.current?.getBoundingClientRect();
+    if (!rect || rect.width === 0) return 0;
+    return (clientX - rect.left) / rect.width;
+  }, []);
+
+  const onPointerDown = (e: PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const now = performance.now();
+    if (now - lastTap.current < 300) {
+      lastTap.current = 0;
+      onChange(0.5);
+      return;
+    }
+    lastTap.current = now;
+    const pointerRatio = ratioAt(e.clientX);
+    const onCap = (e.target as HTMLElement).closest("[data-fader-cap]") !== null;
+    // Grabbing the cap keeps its offset under the finger; a track tap moves the cap to the finger.
+    const offset = onCap ? value - pointerRatio : 0;
+    if (!onCap) onChange(snap(pointerRatio));
+    drag.current = { pointerId: e.pointerId, offset };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDragging(true);
+  };
+
+  const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
+    const d = drag.current;
+    if (!d || d.pointerId !== e.pointerId) return;
+    onChange(snap(ratioAt(e.clientX) + d.offset));
+  };
+
+  const endDrag = (e: PointerEvent<HTMLDivElement>) => {
+    if (drag.current?.pointerId !== e.pointerId) return;
+    drag.current = null;
+    setDragging(false);
+  };
+
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? 0.1 : 0.02;
+    const next =
+      e.key === "ArrowLeft" || e.key === "ArrowDown"
+        ? value - step
+        : e.key === "ArrowRight" || e.key === "ArrowUp"
+          ? value + step
+          : e.key === "Home"
+            ? 0
+            : e.key === "End"
+              ? 1
+              : null;
+    if (next === null) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onChange(Math.min(1, Math.max(0, next)));
+  };
+
+  const pct = value * 100;
+
+  return (
+    <div className="flex w-full flex-col gap-1">
+      <div
+        ref={trackRef}
+        role="slider"
+        tabIndex={0}
+        aria-label="Crossfader"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(pct)}
+        aria-valuetext={
+          value === 0.5 ? "Centre" : value < 0.5 ? `Deck A ${Math.round((1 - value) * 100)}%` : `Deck B ${Math.round(pct)}%`
+        }
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onKeyDown={onKeyDown}
+        className="relative h-12 w-full cursor-pointer touch-none rounded-lg select-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-hidden"
+      >
+        <div className="absolute inset-x-3 top-1/2 h-2 -translate-y-1/2 rounded-full bg-raised">
+          <div
+            className="absolute inset-y-0 left-0 rounded-l-full bg-deck-a/70"
+            style={{ width: `${(1 - value) * 50}%` }}
+          />
+          <div
+            className="absolute inset-y-0 right-0 rounded-r-full bg-deck-b/70"
+            style={{ width: `${value * 50}%` }}
+          />
+          <div aria-hidden="true" className="absolute top-1/2 left-1/2 h-4 w-px -translate-x-1/2 -translate-y-1/2 bg-faint" />
+        </div>
+        <span className="pointer-events-none absolute top-1/2 left-0 -translate-y-1/2 text-xs font-bold text-deck-a">A</span>
+        <span className="pointer-events-none absolute top-1/2 right-0 -translate-y-1/2 text-xs font-bold text-deck-b">B</span>
+        <div className="pointer-events-none absolute inset-x-3 inset-y-0">
+          <motion.div
+            data-fader-cap
+            initial={false}
+            animate={{ left: `${pct}%`, scale: dragging ? 1.12 : 1 }}
+            transition={
+              dragging
+                ? { left: { duration: 0 }, scale: { type: "spring", stiffness: 600, damping: 30 } }
+                : isAutoFading
+                  ? { left: { duration: 0 }, scale: { duration: 0.15 } }
+                  : { type: "spring", stiffness: 520, damping: 38 }
+            }
+            className={cn(
+              "pointer-events-auto absolute top-1/2 flex h-10 w-7 -translate-x-1/2 -translate-y-1/2 cursor-grab items-center justify-center gap-0.5 rounded-md border bg-card shadow-md",
+              dragging ? "cursor-grabbing border-brand" : "border-line",
+            )}
+          >
+            <span className="h-5 w-px bg-dim" />
+            <span className="h-5 w-0.5 bg-fg" />
+            <span className="h-5 w-px bg-dim" />
+          </motion.div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export const CrossfaderPanel = memo(function CrossfaderPanel({
   crossfade,
@@ -92,17 +236,10 @@ export const CrossfaderPanel = memo(function CrossfaderPanel({
       </div>
 
       <div className="flex w-full flex-col gap-1.5">
-        <div className="flex items-center justify-between text-xs font-bold">
-          <span className="text-deck-a">A</span>
-          <span className="text-deck-b">B</span>
-        </div>
-        <Slider
-          aria-label="Crossfader"
-          min={0}
-          max={100}
-          step={1}
-          value={[Math.round(crossfade * 100)]}
-          onValueChange={(vals) => onCrossfadeChange((vals[0] ?? 0) / 100)}
+        <CrossfaderControl
+          value={crossfade}
+          isAutoFading={isAutoFading}
+          onChange={onCrossfadeChange}
         />
       </div>
 
