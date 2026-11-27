@@ -1388,7 +1388,7 @@ export function DjConsole({
       {/* Main Content — Desktop vs Phone Shell */}
       {isDesktop ? (
         <main className="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden p-3 md:p-4">
-          <div className="grid shrink-0 grid-cols-1 gap-3 md:grid-cols-[1fr_228px_1fr]">
+          <div className="grid shrink-0 grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_228px_minmax(0,1fr)]">
             <DeckCard
               deckId="A"
               deck={deckA}
