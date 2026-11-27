@@ -1,6 +1,6 @@
-import { memo, useEffect, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { motion, useMotionValue, useSpring, useTransform } from "framer-motion";
-import type { CueSpot, DeckId } from "@/core/dj-math";
+import { formatTime, type CueSpot, type DeckId } from "@/core/dj-math";
 import { useTheme } from "@/hooks/use-theme";
 import { cn } from "@/lib/utils";
 
@@ -169,9 +169,16 @@ export const WaveformCanvas = memo(function WaveformCanvas({
     (v) => `${Math.max(0, Math.min(100, v * 100))}%`,
   );
 
+  // While scrubbing, the playhead follows the finger 1:1 and playback progress is ignored;
+  // the seek is committed once, on release, so the engine (and the idle deck's entry point)
+  // sees one intentional position instead of a burst of intermediate ones.
+  const [scrubRatio, setScrubRatio] = useState<number | null>(null);
+  const scrubbing = scrubRatio !== null;
+
   useEffect(() => {
+    if (scrubbing) return;
     rawProgress.set(Math.min(1, Math.max(0, progress)));
-  }, [progress, rawProgress]);
+  }, [progress, rawProgress, scrubbing]);
 
   useEffect(() => {
     const baseCanvas = baseCanvasRef.current;
@@ -249,11 +256,51 @@ export const WaveformCanvas = memo(function WaveformCanvas({
     return () => ro.disconnect();
   }, [hasTrack, spots, flagSec, duration, theme]);
 
-  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!hasTrack || locked) return;
+  const canScrub = hasTrack && !locked;
+
+  const ratioAt = (e: React.PointerEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const ratio = (e.clientX - rect.left) / rect.width;
-    onSeek(Math.min(1, Math.max(0, ratio)));
+    return Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+  };
+
+  const scrubTo = (ratio: number) => {
+    setScrubRatio(ratio);
+    rawProgress.set(ratio);
+    smoothProgress.jump(ratio);
+  };
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!canScrub || e.button !== 0) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    scrubTo(ratioAt(e));
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!scrubbing || !e.currentTarget.hasPointerCapture(e.pointerId)) return;
+    scrubTo(ratioAt(e));
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!scrubbing) return;
+    const ratio = ratioAt(e);
+    setScrubRatio(null);
+    onSeek(ratio);
+  };
+
+  const handlePointerCancel = () => {
+    if (!scrubbing) return;
+    setScrubRatio(null);
+    rawProgress.set(Math.min(1, Math.max(0, progress)));
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!canScrub) return;
+    const step = e.shiftKey ? 0.1 : 0.02;
+    if (e.key === "ArrowRight") onSeek(Math.min(1, progress + step));
+    else if (e.key === "ArrowLeft") onSeek(Math.max(0, progress - step));
+    else if (e.key === "Home") onSeek(0);
+    else return;
+    e.preventDefault();
   };
 
   return (
@@ -265,11 +312,18 @@ export const WaveformCanvas = memo(function WaveformCanvas({
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={Math.round(progress * 100)}
-        tabIndex={hasTrack && !locked ? 0 : -1}
+        aria-valuetext={duration > 0 ? formatTime((scrubRatio ?? progress) * duration) : undefined}
+        tabIndex={canScrub ? 0 : -1}
         onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerCancel}
+        onLostPointerCapture={handlePointerCancel}
+        onKeyDown={handleKeyDown}
         className={cn(
-          "relative h-16 w-full overflow-hidden rounded-lg border border-line bg-bg/70 select-none",
-          hasTrack && !locked && "cursor-pointer",
+          "relative h-16 w-full overflow-hidden rounded-lg border bg-bg/70 transition-[border-color,box-shadow] duration-150 select-none",
+          canScrub ? "touch-none cursor-grab" : "touch-pan-y",
+          scrubbing ? "cursor-grabbing border-fg/40 shadow-md" : "border-line",
           locked && "cursor-not-allowed",
         )}
       >
@@ -291,8 +345,19 @@ export const WaveformCanvas = memo(function WaveformCanvas({
         {hasTrack && (
           <motion.div
             style={{ left: playheadLeft }}
-            className="pointer-events-none absolute top-0.5 bottom-0.5 w-0.5 -translate-x-1/2 rounded-full bg-fg shadow-xs"
-          />
+            animate={{ width: scrubbing ? 3 : 2 }}
+            className="pointer-events-none absolute top-0.5 bottom-0.5 -translate-x-1/2 rounded-full bg-fg shadow-xs"
+          >
+            {scrubbing && duration > 0 && (
+              <motion.span
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="absolute top-1 left-1/2 -translate-x-1/2 rounded bg-fg px-1.5 py-0.5 font-mono text-[10px] font-semibold text-bg tabular-nums shadow"
+              >
+                {formatTime(scrubRatio * duration)}
+              </motion.span>
+            )}
+          </motion.div>
         )}
 
         {hasTrack && loading && (
