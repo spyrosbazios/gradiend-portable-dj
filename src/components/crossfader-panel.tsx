@@ -1,6 +1,12 @@
 import { memo } from "react";
 import { ArrowLeft, ArrowLeftRight, ArrowRight, Sparkles } from "lucide-react";
-import type { DeckId, MixMode, SpotQuality } from "@/core/dj-math";
+import {
+  FADE_BAR_OPTIONS,
+  type DeckId,
+  type FadeBars,
+  type MixMode,
+  type SpotQuality,
+} from "@/core/dj-math";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
@@ -8,7 +14,7 @@ import { Slider } from "@/components/ui/slider";
 interface CrossfaderPanelProps {
   crossfade: number;
   isAutoFading: boolean;
-  fadeSeconds: number;
+  fadeBars: FadeBars;
   mixMode: MixMode;
   transitionLabel: string | null;
   nextBeatQuality: SpotQuality | null;
@@ -16,11 +22,10 @@ interface CrossfaderPanelProps {
   canAutoFade: boolean;
   onCrossfadeChange: (val: number) => void;
   onAutoFade: () => void;
-  onFadeSecondsChange: (sec: number) => void;
+  onFadeBarsChange: (bars: FadeBars) => void;
   onMixModeChange: (mode: MixMode) => void;
 }
 
-const FADE_OPTIONS = [3, 5, 8] as const;
 
 const MIX_MODES: ReadonlyArray<{ id: MixMode; label: string; title: string }> = [
   {
@@ -43,7 +48,7 @@ const MIX_MODES: ReadonlyArray<{ id: MixMode; label: string; title: string }> = 
 export const CrossfaderPanel = memo(function CrossfaderPanel({
   crossfade,
   isAutoFading,
-  fadeSeconds,
+  fadeBars,
   mixMode,
   transitionLabel,
   nextBeatQuality,
@@ -51,7 +56,7 @@ export const CrossfaderPanel = memo(function CrossfaderPanel({
   canAutoFade,
   onCrossfadeChange,
   onAutoFade,
-  onFadeSecondsChange,
+  onFadeBarsChange,
   onMixModeChange,
 }: CrossfaderPanelProps) {
   const isGoodNextBeat = nextBeatQuality === "good";
@@ -162,22 +167,25 @@ export const CrossfaderPanel = memo(function CrossfaderPanel({
             ))}
           </div>
 
-          <div className="flex items-center gap-0.5">
-            {FADE_OPTIONS.map((sec) => (
+          <div role="group" aria-label="Mix length in bars" className="flex items-center gap-0.5">
+            {FADE_BAR_OPTIONS.map((bars) => (
               <button
-                key={sec}
+                key={bars}
                 type="button"
-                onClick={() => onFadeSecondsChange(sec)}
+                aria-pressed={fadeBars === bars}
+                title={`Mix over ${bars} bars`}
+                onClick={() => onFadeBarsChange(bars)}
                 className={cn(
                   "rounded px-1.5 py-0.5 font-mono text-[10px] transition-colors",
-                  fadeSeconds === sec
+                  fadeBars === bars
                     ? "bg-brand-soft font-semibold text-brand"
                     : "text-dim hover:bg-raised",
                 )}
               >
-                {sec}s
+                {bars}
               </button>
             ))}
+            <span className="pl-0.5 text-[10px] text-faint">bars</span>
           </div>
         </div>
       </div>

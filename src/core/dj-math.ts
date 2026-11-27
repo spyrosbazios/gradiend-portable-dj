@@ -1220,14 +1220,22 @@ export type TransitionTechnique =
   | "bass-swap"
   | "classic";
 
+/** Mix lengths the DJ can pick, in bars of the outgoing track. */
+export const FADE_BAR_OPTIONS = [8, 16, 32] as const;
+export type FadeBars = (typeof FADE_BAR_OPTIONS)[number];
+/** Tempo assumed for bar-based timing when a track has no BPM yet. */
+const FALLBACK_TIMING_BPM = 125;
+
 export interface TransitionPlan {
   technique: TransitionTechnique;
   durationMs: number;
-  /** Fade length in bars (8 or 16) when beat-gridded, or null when ungridded / echo-out. */
-  fadeBars: number | null;
+  /** Mix length in bars of the outgoing track. */
+  fadeBars: number;
   label: string;
   /** Starting playbackRate for the incoming deck (1.0 when unsynced). */
   initialPlaybackRate: number;
+  /** Incoming beats per outgoing beat used for tempo sync (1, 2 or 0.5); null when unsynced. */
+  tempoMultiplier: number | null;
   /** Outgoing BPM-synced echo delay in seconds (0 when unused). */
   echoDelaySec: number;
 }
@@ -1258,124 +1266,152 @@ function echoDelayForBpm(fromBpm: number | null): number {
     : 0.375;
 }
 
-function barFadeDurationMs(fromBpm: number, bars: number): number {
-  return Math.round(bars * ((4 * 60) / fromBpm) * 1000);
+/** Milliseconds `bars` bars last at `fromBpm` (the fallback tempo when it is unknown). */
+export function barFadeDurationMs(fromBpm: number | null, bars: number): number {
+  const bpm = fromBpm && fromBpm > 0 ? fromBpm : FALLBACK_TIMING_BPM;
+  return Math.round(bars * ((4 * 60) / bpm) * 1000);
 }
 
 /**
- * Chooses the optimal transition technique, bar-aligned duration, tempo-sync ratio,
- * and BPM-synced echo delay based on mix mode, BPM fit, cue confidence, and chosen
- * entry/exit spot qualities. Low confidence or any risky spot forces echo-out + drop.
+ * Chooses the transition technique, bar-aligned length, tempo-sync ratio and echo delay.
+ *
+ * Smart mode always blends over whole bars when it can: the DJ's chosen length for a
+ * clean pair, a short 4-bar bass swap when a spot is risky, and an echo-out only when the
+ * tempos clash or there is no trustworthy beat grid.
  */
 export function planMixTransition(options: {
   mode: MixMode;
+  /** Outgoing tempo; pass the beat grid's BPM when available (0.1 BPM precision). */
   fromBpm: number | null;
   toBpm: number | null;
-  baseDurationMs: number;
+  fadeBars: FadeBars;
+  /** Bars the outgoing track has left after the mix starts; the mix never outlasts them. */
+  barsAvailable?: number;
   confidence?: "high" | "low";
   exitQuality?: SpotQuality | null;
   entryQuality?: SpotQuality | null;
 }): TransitionPlan {
-  const { mode, fromBpm, toBpm, baseDurationMs, confidence, exitQuality, entryQuality } = options;
-  const safeBase = Math.max(1500, Math.min(12000, baseDurationMs));
-  const hasGrid = confidence === "high" && fromBpm !== null && fromBpm > 0;
+  const { mode, fromBpm, toBpm, fadeBars, barsAvailable, confidence, exitQuality, entryQuality } =
+    options;
+  const bars = (wanted: number) => {
+    // Keep an even bar count so the bass swap lands on the middle bar line.
+    const cap = barsAvailable === undefined ? wanted : Math.floor(barsAvailable / 2) * 2;
+    const n = Math.max(2, Math.min(wanted, cap));
+    return { fadeBars: n, durationMs: barFadeDurationMs(fromBpm, n) };
+  };
 
   if (mode === "classic") {
     return {
       technique: "classic",
-      durationMs: safeBase,
-      fadeBars: null,
+      ...bars(fadeBars),
       label: "Classic fade",
       initialPlaybackRate: 1,
+      tempoMultiplier: null,
       echoDelaySec: 0,
     };
   }
+
+  const sync = tempoSync(fromBpm, toBpm);
 
   if (mode === "bass-swap") {
-    const fadeBars = hasGrid
-      ? exitQuality === "good" && entryQuality === "good" && safeBase >= 8000
-        ? 16
-        : 8
-      : null;
     return {
       technique: "bass-swap",
-      durationMs: fadeBars !== null && fromBpm ? barFadeDurationMs(fromBpm, fadeBars) : safeBase,
-      fadeBars,
+      ...bars(fadeBars),
       label: "Bass swap",
       initialPlaybackRate: 1,
+      tempoMultiplier: null,
       echoDelaySec: 0,
-    };
-  }
-
-  // Low analysis confidence or a risky exit/entry forces echo-out + drop on beat 1
-  if (confidence === "low" || exitQuality === "risky" || entryQuality === "risky") {
-    return {
-      technique: "echo-out",
-      durationMs: Math.max(2000, Math.min(safeBase, 2600)),
-      fadeBars: null,
-      label: "Echo out",
-      initialPlaybackRate: 1,
-      echoDelaySec: echoDelayForBpm(fromBpm),
     };
   }
 
   const fit = evaluateBpmFit(fromBpm, toBpm);
-
-  if (fit.status === "good" && fromBpm && toBpm) {
-    // Match direct, half-time, or double-time tempo cleanly within ±6%
-    const multipliers = [1, 2, 0.5];
-    let bestMult = 1;
-    let bestPct = Number.POSITIVE_INFINITY;
-    for (const m of multipliers) {
-      const pct = Math.abs(toBpm * m - fromBpm) / fromBpm;
-      if (pct < bestPct) {
-        bestPct = pct;
-        bestMult = m;
-      }
-    }
-    const rawRate = fromBpm / (toBpm * bestMult);
-    const clampedRate = Math.min(1.06, Math.max(0.94, rawRate));
-    const initialPlaybackRate = Math.abs(clampedRate - 1) < 0.004 ? 1 : clampedRate;
-    const fadeBars = hasGrid
-      ? exitQuality === "good" && entryQuality === "good" && safeBase >= 5000
-        ? 16
-        : 8
-      : null;
-    const durationMs =
-      fadeBars !== null
-        ? barFadeDurationMs(fromBpm, fadeBars)
-        : Math.round(Math.min(9000, Math.max(3500, safeBase * 1.15)));
-
-    return {
-      technique: "sync-bass-swap",
-      durationMs,
-      fadeBars,
-      label: initialPlaybackRate !== 1 ? "Sync · Bass swap" : "Bass swap",
-      initialPlaybackRate,
-      echoDelaySec: 0,
-    };
-  }
-
-  if (fit.status === "clash") {
+  if (confidence === "low" || fit.status === "clash" || !fromBpm) {
     return {
       technique: "echo-out",
-      durationMs: Math.max(2000, Math.min(safeBase, 2600)),
-      fadeBars: null,
+      ...bars(2),
       label: "Echo out",
       initialPlaybackRate: 1,
+      tempoMultiplier: null,
       echoDelaySec: echoDelayForBpm(fromBpm),
     };
   }
 
-  const fadeBars = hasGrid ? 8 : null;
+  const risky = exitQuality === "risky" || entryQuality === "risky";
+
+  if (sync) {
+    return {
+      technique: "sync-bass-swap",
+      ...bars(risky ? 4 : fadeBars),
+      label: risky ? "Quick bass swap" : sync.rate !== 1 ? "Sync · Bass swap" : "Bass swap",
+      initialPlaybackRate: sync.rate,
+      tempoMultiplier: sync.multiplier,
+      echoDelaySec: 0,
+    };
+  }
+
   return {
     technique: "filter-sweep",
-    durationMs: fadeBars !== null && fromBpm ? barFadeDurationMs(fromBpm, fadeBars) : safeBase,
-    fadeBars,
+    ...bars(risky ? 4 : Math.min(fadeBars, 8)),
     label: "Filter sweep",
     initialPlaybackRate: 1,
+    tempoMultiplier: null,
     echoDelaySec: 0,
   };
+}
+
+/**
+ * Playback rate that matches the incoming tempo to the outgoing one (direct, half or
+ * double time), or null when the tempos are more than 6% apart.
+ */
+function tempoSync(
+  fromBpm: number | null,
+  toBpm: number | null,
+): { rate: number; multiplier: number } | null {
+  if (!fromBpm || !toBpm || fromBpm <= 0 || toBpm <= 0) return null;
+  let best: { rate: number; multiplier: number; pct: number } | null = null;
+  for (const multiplier of [1, 2, 0.5]) {
+    const pct = Math.abs(toBpm * multiplier - fromBpm) / fromBpm;
+    if (!best || pct < best.pct) best = { rate: fromBpm / (toBpm * multiplier), multiplier, pct };
+  }
+  if (!best || best.pct > 0.06) return null;
+  return { rate: Math.abs(best.rate - 1) < 0.0005 ? 1 : best.rate, multiplier: best.multiplier };
+}
+
+/** Largest speed change the phase lock may apply on top of the tempo-sync rate. */
+const PHASE_LOCK_MAX_NUDGE = 0.01;
+/** Beat offsets below this are left alone so audio-clock jitter does not wobble the tempo. */
+const PHASE_LOCK_DEADBAND_SEC = 0.006;
+
+/**
+ * Phase lock for a blend: returns the incoming deck's playbackRate that pulls its beats
+ * back onto the outgoing deck's beats. Positive offset (incoming early) slows it down;
+ * each call corrects half the offset per second of playback, capped at ±1% speed.
+ */
+export function phaseLockRate(options: {
+  baseRate: number;
+  tempoMultiplier: number;
+  outGrid: BeatGrid;
+  outTimeSec: number;
+  outRate: number;
+  inGrid: BeatGrid;
+  inTimeSec: number;
+}): { rate: number; offsetSec: number } {
+  const { baseRate, tempoMultiplier, outGrid, outTimeSec, outRate, inGrid, inTimeSec } = options;
+  const outBeat = 60 / outGrid.bpm;
+  const inBeat = 60 / (inGrid.bpm * tempoMultiplier);
+  const frac = (v: number) => v - Math.floor(v);
+  const outPhase = frac((outTimeSec - outGrid.firstDownbeatSec) / outBeat);
+  const inPhase = frac((inTimeSec - inGrid.firstDownbeatSec) / inBeat);
+  const diffBeats = frac(inPhase - outPhase + 0.5) - 0.5;
+  const offsetSec = (diffBeats * outBeat) / (outRate || 1);
+  if (Math.abs(offsetSec) < PHASE_LOCK_DEADBAND_SEC) return { rate: baseRate, offsetSec };
+  const nudge = Math.max(-PHASE_LOCK_MAX_NUDGE, Math.min(PHASE_LOCK_MAX_NUDGE, offsetSec / 2));
+  return { rate: baseRate * (1 - nudge), offsetSec };
+}
+
+/** Tempo to plan a mix with: the beat grid's precise BPM, else the rounded track BPM. */
+export function mixTempo(cues: TrackCues | null, bpm: number | null): number | null {
+  return cues?.grid?.bpm ?? bpm;
 }
 
 /**
@@ -1385,6 +1421,7 @@ export function planMixTransition(options: {
 export function computeTransitionDsp(
   technique: TransitionTechnique,
   progress: number,
+  fadeBars: number,
 ): { outgoing: DeckTransitionDsp; incoming: DeckTransitionDsp } {
   const p = clamp01(progress);
 
@@ -1406,18 +1443,23 @@ export function computeTransitionDsp(
   }
 
   if (technique === "bass-swap" || technique === "sync-bass-swap") {
-    // Clean equal-power blend with an automated bass swap across 42% -> 58%
-    const swap = smoothstep((p - 0.42) / 0.16);
-    const tailLift = smoothstep((p - 0.65) / 0.35);
+    // DJ-style blend: the incoming track rises to full volume over the first 40% with its
+    // bass cut while the outgoing track holds at full; the bass swaps over one beat on the
+    // middle bar line; only then does the outgoing track fade away.
+    const swapAt = 0.5;
+    const swapWidth = 1 / (4 * Math.max(1, fadeBars));
+    const swap = smoothstep((p - swapAt) / swapWidth);
+    const outFade = smoothstep((p - swapAt) / (1 - swapAt));
+    const tailLift = smoothstep((p - 0.7) / 0.3);
     return {
       outgoing: {
-        gain: Math.cos(p * Math.PI * 0.5),
+        gain: Math.cos(outFade * Math.PI * 0.5),
         bassDb: -20 * swap,
         hpfHz: 20 + 260 * tailLift,
         echoSend: 0,
       },
       incoming: {
-        gain: Math.sin(p * Math.PI * 0.5),
+        gain: Math.sin(clamp01(p / 0.4) * Math.PI * 0.5),
         bassDb: -20 * (1 - swap),
         hpfHz: 20,
         echoSend: 0,
