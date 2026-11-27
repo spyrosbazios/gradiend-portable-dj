@@ -851,7 +851,14 @@ export function analyzeTrackCuesFromEnvelopes(envelopes: AudioEnvelopes): {
     const posFrac = clamp01((sec - audible.startSec) / audibleSpan);
     const barsRemaining = (audible.endSec - sec) / barSec;
 
-    const vocalsSustained = bar > 0 && before4.mid >= 0.42 && after4.mid >= 0.42;
+    // Vocals are judged on the 2 bars either side of the boundary: 4-bar averages blur a
+    // vocal that starts or stops right at the phrase, which is exactly the best mix point.
+    // Tuned against Demucs-separated vocal stems of real vocal-house tracks.
+    const before2 = bar === 0 ? { energy: 0, low: 0, mid: 0 } : averageRange(bars, bar - 2, bar);
+    const after2 = averageRange(bars, bar, bar + 2);
+    const vocalsSustained = bar > 0 && before2.mid >= 0.4 && after2.mid >= 0.4;
+    // A full-energy groove is a normal place to mix with a bass swap, so it lowers the
+    // rating to "ok" instead of marking it risky.
     const insideDrop =
       bar > 0 &&
       before4.energy >= 0.72 &&
@@ -865,11 +872,8 @@ export function analyzeTrackCuesFromEnvelopes(envelopes: AudioEnvelopes): {
       entryQuality = "risky";
       entryReason = "vocals across boundary";
     } else if (insideDrop) {
-      entryQuality = "risky";
-      entryReason = "inside high-energy drop";
-    } else if (bar > 0 && after4.mid >= 0.55 && before4.energy >= 0.45) {
-      entryQuality = "risky";
-      entryReason = "vocals active here";
+      entryQuality = "ok";
+      entryReason = "full groove, bass swap";
     } else if (barsRemaining < 8 || posFrac > 0.78) {
       entryQuality = "risky";
       entryReason = "too late in track";
@@ -928,8 +932,8 @@ export function analyzeTrackCuesFromEnvelopes(envelopes: AudioEnvelopes): {
       exitQuality = "risky";
       exitReason = "vocals across boundary";
     } else if (insideDrop) {
-      exitQuality = "risky";
-      exitReason = "inside high-energy drop";
+      exitQuality = "ok";
+      exitReason = "full groove, bass swap";
     } else if (barsRemaining < 7.5) {
       exitQuality = "risky";
       exitReason = "too close to end";

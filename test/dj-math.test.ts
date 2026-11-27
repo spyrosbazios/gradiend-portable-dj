@@ -442,6 +442,8 @@ function makeStructuredTrack(options: {
   introBars?: number;
   bodyBars?: number;
   outroBars?: number;
+  /** Sustained mid-band synth bed under every bar, like the pads/guitars of real mixes. */
+  padGain?: number;
 }): Float32Array {
   const {
     bpm,
@@ -450,6 +452,7 @@ function makeStructuredTrack(options: {
     introBars = 16,
     bodyBars = 32,
     outroBars = 16,
+    padGain = 0,
   } = options;
   const beatSec = 60 / bpm;
   const barSec = beatSec * 4;
@@ -477,6 +480,17 @@ function makeStructuredTrack(options: {
       }
     }
 
+    if (padGain > 0) {
+      const s0 = Math.round(barStartSec * sampleRate);
+      const s1 = Math.min(pcm.length, Math.round(barEndSec * sampleRate));
+      for (let i = s0; i < s1; i++) {
+        pcm[i] =
+          (pcm[i] ?? 0) +
+          padGain * Math.sin((2 * Math.PI * 440 * i) / sampleRate) +
+          padGain * 0.7 * Math.sin((2 * Math.PI * 660 * i) / sampleRate);
+      }
+    }
+
     // Sustained 300 Hz–3 kHz vocal-band tone across the entire body
     if (inBody) {
       const s0 = Math.round(barStartSec * sampleRate);
@@ -494,6 +508,20 @@ function makeStructuredTrack(options: {
 }
 
 describe("Transition cue analysis (phrase features, ratings, fallback)", () => {
+  test("a track with the same vocal-band level throughout is not rated all risky", () => {
+    const sr = 22050;
+    const pcm = makeStructuredTrack({
+      bpm: 124,
+      sampleRate: sr,
+      introBars: 0,
+      bodyBars: 64,
+      outroBars: 0,
+      padGain: 0.3,
+    });
+    const { cues } = analyzeTrackCues(pcm, sr);
+    expect(cues.entries.some((s) => s.quality !== "risky")).toBe(true);
+  });
+
   test("rates intro good for entry, vocal body risky, and outro good for exit", () => {
     const sr = 22050;
     const pcm = makeStructuredTrack({ bpm: 120, offsetSec: 0.25, sampleRate: sr });
