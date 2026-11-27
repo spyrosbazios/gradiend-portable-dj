@@ -956,18 +956,16 @@ export class DjAudioEngine {
   }
 
   /**
-   * Starts a hand-driven mix when the DJ pulls the fader from the playing deck toward a
-   * loaded idle deck. Returns true when it took over the fader move.
+   * Starts a hand-driven mix, and with it the idle deck, as soon as the DJ moves the fader
+   * toward a loaded idle deck while the other deck plays, wherever the fader sits.
+   * Returns true when it took over the fader move.
    */
   private maybeStartHandMix(prev: number): boolean {
     const towardB = this.crossfade > prev;
     const targetDeck: DeckId = towardB ? "B" : "A";
     const oldDeck: DeckId = towardB ? "A" : "B";
-    const endVal = towardB ? 1 : 0;
-    if (this.crossfade === prev || Math.abs(endVal - prev) < 0.2) return false;
+    if (this.crossfade === prev) return false;
     if (this.decks[oldDeck].audio.paused || !this.decks[targetDeck].snapshot.track) return false;
-    // The fader must come from the playing deck's side.
-    if (towardB ? prev > 0.5 : prev < 0.5) return false;
 
     this.ensureAudioGraph();
     const prepared = this.prepareMix(targetDeck);
