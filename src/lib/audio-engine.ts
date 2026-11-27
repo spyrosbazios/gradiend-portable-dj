@@ -833,10 +833,10 @@ export class DjAudioEngine {
       entryQuality,
     });
 
-    // Seek incoming deck to its chosen entry phrase cue BEFORE the beat-1 timer fires
+    // Seek incoming deck to its chosen entry phrase cue BEFORE the beat-1 timer fires,
+    // even if it is already running silently: the selected entry is the DJ's choice.
     const targetDur = targetInternals.snapshot.duration || targetInternals.audio.duration || 0;
     if (
-      targetInternals.audio.paused &&
       selectedEntry &&
       selectedEntry.sec >= 0 &&
       (targetDur === 0 || selectedEntry.sec < targetDur - 2)

@@ -1030,6 +1030,7 @@ export function findCueSpot(spots: CueSpot[], bar: number | null): CueSpot | nul
 /**
  * Returns the live deck's active exit flag: normally `bestExitBar`, advancing to the
  * next good (then ok, then any) exit if the playhead has passed the suggested flag.
+ * Returns null once no exit lies ahead, so callers fall back to the end-of-track trigger.
  */
 export function getActiveExitSpot(
   cues: TrackCues | null,
@@ -1052,7 +1053,7 @@ export function getActiveExitSpot(
   if (upcomingOk) return upcomingOk;
 
   const upcomingAny = cues.exits.find((s) => s.sec > currentTimeSec + 0.05);
-  return upcomingAny ?? suggested;
+  return upcomingAny ?? null;
 }
 
 /**

@@ -570,6 +570,7 @@ describe("Transition cue analysis (phrase features, ratings, fallback)", () => {
     expect(getActiveExitSpot(cues, 20)?.bar).toBe(32);
     expect(getActiveExitSpot(cues, 70)?.bar).toBe(48);
     expect(getActiveExitSpot(cues, 100)?.bar).toBe(56);
+    expect(getActiveExitSpot(cues, 115)).toBeNull();
     expect(getExitQualityAtTime(cues, 66)).toBe("good");
     expect(getExitQualityAtTime(cues, 82)).toBe("risky");
   });
