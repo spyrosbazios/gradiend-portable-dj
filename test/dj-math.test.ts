@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  analyzeTrackCues,
   computeBandEnvelopes,
   computeTransitionDsp,
   computeWaveformAndAutoGain,
@@ -8,9 +9,13 @@ import {
   equalPowerGains,
   estimateBpm,
   evaluateBpmFit,
+  findCueSpot,
   formatTime,
+  getActiveExitSpot,
+  getExitQualityAtTime,
   getIdleDeck,
   getLiveDeck,
+  getNextBeatOneSec,
   isAudioFile,
   isDeckFadedOut,
   parseFilenameMetadata,
@@ -391,5 +396,159 @@ describe("Beat grid & downbeat detection", () => {
     const res = detectBeatGrid(pcm, sr);
     expect(res.grid).toBeNull();
     expect(res.confidence).toBe("low");
+  });
+});
+
+/**
+ * Synthesizes a structured 64-bar track at `bpm` with:
+ * - Bars 0..15: instrumental intro (moderate kick, no mid-band vocals)
+ * - Bars 16..47: high-energy vocal body (loud kick + sustained 900 Hz / 1.4 kHz vocal proxy)
+ * - Bars 48..63: instrumental outro (energy drops, vocals end cleanly)
+ */
+function makeStructuredTrack(options: {
+  bpm: number;
+  offsetSec?: number;
+  sampleRate?: number;
+  introBars?: number;
+  bodyBars?: number;
+  outroBars?: number;
+}): Float32Array {
+  const {
+    bpm,
+    offsetSec = 0.2,
+    sampleRate = 22050,
+    introBars = 16,
+    bodyBars = 32,
+    outroBars = 16,
+  } = options;
+  const beatSec = 60 / bpm;
+  const barSec = beatSec * 4;
+  const totalBars = introBars + bodyBars + outroBars;
+  const durationSec = offsetSec + totalBars * barSec + 1.0;
+  const pcm = new Float32Array(Math.floor(sampleRate * durationSec));
+  const kickLen = Math.floor(sampleRate * 0.09);
+
+  for (let bar = 0; bar < totalBars; bar++) {
+    const inIntro = bar < introBars;
+    const inBody = bar >= introBars && bar < introBars + bodyBars;
+    const barStartSec = offsetSec + bar * barSec;
+    const barEndSec = barStartSec + barSec;
+
+    // 4/4 kicks (stronger on beat 1 and louder in body)
+    const sectionGain = inBody ? 0.85 : inIntro ? 0.35 : 0.32;
+    for (let beat = 0; beat < 4; beat++) {
+      const startSample = Math.round((barStartSec + beat * beatSec) * sampleRate);
+      const gain = sectionGain * (beat === 0 ? 1.0 : 0.55);
+      const freq = beat === 0 ? 70 : 105;
+      for (let k = 0; k < kickLen && startSample + k < pcm.length; k++) {
+        const env = Math.exp((-5.5 * k) / kickLen);
+        pcm[startSample + k] =
+          (pcm[startSample + k] ?? 0) + gain * env * Math.sin((2 * Math.PI * freq * k) / sampleRate);
+      }
+    }
+
+    // Sustained 300 Hz–3 kHz vocal-band tone across the entire body
+    if (inBody) {
+      const s0 = Math.round(barStartSec * sampleRate);
+      const s1 = Math.min(pcm.length, Math.round(barEndSec * sampleRate));
+      for (let i = s0; i < s1; i++) {
+        const vocal =
+          0.32 * Math.sin((2 * Math.PI * 880 * i) / sampleRate) +
+          0.2 * Math.sin((2 * Math.PI * 1450 * i) / sampleRate);
+        pcm[i] = (pcm[i] ?? 0) + vocal;
+      }
+    }
+  }
+
+  return pcm;
+}
+
+describe("Transition cue analysis (phrase features, ratings, fallback)", () => {
+  test("rates intro good for entry, vocal body risky, and outro good for exit", () => {
+    const sr = 22050;
+    const pcm = makeStructuredTrack({ bpm: 120, offsetSec: 0.25, sampleRate: sr });
+    const { bpm, cues } = analyzeTrackCues(pcm, sr);
+
+    expect(cues.version).toBe(1);
+    expect(cues.confidence).toBe("high");
+    expect(cues.grid).not.toBeNull();
+    expect(Math.abs((bpm ?? 0) - 120)).toBeLessThanOrEqual(1);
+    expect(Math.abs((cues.grid?.firstDownbeatSec ?? 0) - 0.25)).toBeLessThanOrEqual(0.03);
+
+    // Phrase starts every 8 bars: 0, 8, 16, 24, 32, 40, 48, 56
+    expect(cues.entries.map((s) => s.bar)).toEqual([0, 8, 16, 24, 32, 40, 48, 56]);
+    expect(cues.exits.map((s) => s.bar)).toEqual([0, 8, 16, 24, 32, 40, 48, 56]);
+
+    // Intro bar 0 is a good entry and bestEntryBar lies in the clean intro (bars 0 or 8)
+    const entryBar0 = findCueSpot(cues.entries, 0);
+    expect(entryBar0?.quality).toBe("good");
+    expect(cues.bestEntryBar).toBeLessThanOrEqual(8);
+
+    // Mid-body vocal boundaries (bars 24, 32, 40) are risky for both entry and exit
+    for (const bar of [24, 32, 40]) {
+      expect(findCueSpot(cues.entries, bar)?.quality).toBe("risky");
+      expect(findCueSpot(cues.exits, bar)?.quality).toBe("risky");
+    }
+
+    // Outro start (bar 48, 16 bars before audible end) is a good exit and chosen as bestExitBar
+    const exitBar48 = findCueSpot(cues.exits, 48);
+    expect(exitBar48?.quality).toBe("good");
+    expect(cues.bestExitBar).toBe(48);
+
+    // Bar 56 only has 8 bars remaining (< 16 bars), so it is not rated good
+    expect(findCueSpot(cues.exits, 56)?.quality).not.toBe("good");
+  });
+
+  test("falls back to silence-trimmed single entry/exit with low confidence when no grid fits", () => {
+    const sr = 22050;
+    const pcm = new Float32Array(sr * 30);
+    // 3s silence, 22s beatless drone (3s..25s), 5s silence
+    for (let i = sr * 3; i < sr * 25; i++) {
+      pcm[i] = 0.25 * Math.sin((2 * Math.PI * 220 * i) / sr);
+    }
+    const { cues } = analyzeTrackCues(pcm, sr);
+
+    expect(cues.grid).toBeNull();
+    expect(cues.confidence).toBe("low");
+    expect(cues.entries).toHaveLength(1);
+    expect(cues.exits).toHaveLength(1);
+    expect(cues.bestEntryBar).toBe(0);
+    expect(cues.bestExitBar).toBe(0);
+    expect(cues.entries[0]?.sec ?? 0).toBeGreaterThanOrEqual(2.8);
+    expect(cues.entries[0]?.sec ?? 0).toBeLessThanOrEqual(3.2);
+    expect(cues.exits[0]?.sec ?? 0).toBeGreaterThan(cues.entries[0]?.sec ?? 0);
+    expect(cues.exits[0]?.sec ?? 99).toBeLessThan(25);
+  });
+
+  test("advances active exit flag to next good exit when playhead passes suggested flag", () => {
+    const cues = {
+      version: 1 as const,
+      grid: { bpm: 120, firstDownbeatSec: 0 },
+      entries: [],
+      exits: [
+        { bar: 16, sec: 32, quality: "risky" as const, reason: "vocals" },
+        { bar: 32, sec: 64, quality: "good" as const, reason: "breakdown" },
+        { bar: 40, sec: 80, quality: "risky" as const, reason: "vocals" },
+        { bar: 48, sec: 96, quality: "good" as const, reason: "outro" },
+        { bar: 56, sec: 112, quality: "ok" as const, reason: "short outro" },
+      ],
+      bestEntryBar: 0,
+      bestExitBar: 32,
+      confidence: "high" as const,
+    };
+
+    expect(getActiveExitSpot(cues, 20)?.bar).toBe(32);
+    expect(getActiveExitSpot(cues, 70)?.bar).toBe(48);
+    expect(getActiveExitSpot(cues, 100)?.bar).toBe(56);
+    expect(getExitQualityAtTime(cues, 66)).toBe("good");
+    expect(getExitQualityAtTime(cues, 82)).toBe("risky");
+  });
+
+  test("computes next beat 1 strictly within one bar ahead", () => {
+    const grid = { bpm: 120, firstDownbeatSec: 0.5 }; // barSec = 2.0
+    expect(getNextBeatOneSec(grid, 0.1)).toBeCloseTo(0.5, 4);
+    expect(getNextBeatOneSec(grid, 0.5)).toBeCloseTo(2.5, 4);
+    expect(getNextBeatOneSec(grid, 2.4)).toBeCloseTo(2.5, 4);
+    expect(getNextBeatOneSec(grid, 2.51)).toBeCloseTo(4.5, 4);
   });
 });

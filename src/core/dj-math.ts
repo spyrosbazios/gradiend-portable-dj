@@ -804,6 +804,401 @@ export function detectBeatGrid(channelData: Float32Array, sampleRate: number): B
   return detectBeatGridFromEnvelopes(envelopes);
 }
 
+interface BarFeature {
+  energy: number;
+  low: number;
+  mid: number;
+}
+
+function percentile(values: number[], p: number): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(p * (sorted.length - 1))));
+  return sorted[idx] ?? 0;
+}
+
+function averageRange(bars: BarFeature[], start: number, end: number): BarFeature {
+  const s = Math.max(0, start);
+  const e = Math.min(bars.length, end);
+  if (e <= s) return { energy: 0, low: 0, mid: 0 };
+  let energy = 0;
+  let low = 0;
+  let mid = 0;
+  for (let i = s; i < e; i++) {
+    const b = bars[i];
+    if (!b) continue;
+    energy += b.energy;
+    low += b.low;
+    mid += b.mid;
+  }
+  const count = e - s;
+  return { energy: energy / count, low: low / count, mid: mid / count };
+}
+
+function buildFallbackCues(audibleStartSec: number, audibleEndSec: number): TrackCues {
+  const safeStart = Math.max(0, Math.round(audibleStartSec * 100) / 100);
+  const span = Math.max(0, audibleEndSec - safeStart);
+  const tailLead = Math.min(12, Math.max(2, span * 0.2));
+  const safeEnd = Math.max(safeStart, Math.round((audibleEndSec - tailLead) * 100) / 100);
+
+  return {
+    version: TRACK_CUES_VERSION,
+    grid: null,
+    entries: [
+      {
+        bar: 0,
+        sec: safeStart,
+        quality: "ok",
+        reason: "no beat grid · echo-out",
+      },
+    ],
+    exits: [
+      {
+        bar: 0,
+        sec: safeEnd,
+        quality: "ok",
+        reason: "no beat grid · fade before end",
+      },
+    ],
+    bestEntryBar: 0,
+    bestExitBar: 0,
+    confidence: "low",
+  };
+}
+
+/**
+ * Computes per-bar normalized features, 8-bar phrase starts, entry/exit ratings,
+ * and fallback cues from precomputed multi-band envelopes.
+ */
+export function analyzeTrackCuesFromEnvelopes(envelopes: AudioEnvelopes): {
+  bpm: number | null;
+  cues: TrackCues;
+} {
+  const { envRate, durationSec, total, low, mid } = envelopes;
+  const audible = findAudibleRange(total, envRate, durationSec);
+  const gridRes = detectBeatGridFromEnvelopes(envelopes);
+
+  if (!gridRes.grid) {
+    return {
+      bpm: gridRes.bpm,
+      cues: buildFallbackCues(audible.startSec, audible.endSec),
+    };
+  }
+
+  const { grid, confidence } = gridRes;
+  const barSec = (4 * 60) / grid.bpm;
+  const numBars = Math.floor((audible.endSec - grid.firstDownbeatSec + barSec * 0.25) / barSec);
+
+  if (numBars < 8) {
+    return {
+      bpm: gridRes.bpm,
+      cues: buildFallbackCues(audible.startSec, audible.endSec),
+    };
+  }
+
+  const rawEnergy: number[] = [];
+  const rawLow: number[] = [];
+  const rawMid: number[] = [];
+
+  for (let b = 0; b < numBars; b++) {
+    const t0 = grid.firstDownbeatSec + b * barSec;
+    const t1 = t0 + barSec;
+    const f0 = Math.max(0, Math.floor(t0 * envRate));
+    const f1 = Math.min(total.length, Math.max(f0 + 1, Math.floor(t1 * envRate)));
+
+    let sumE = 0;
+    let sumL = 0;
+    let sumM = 0;
+    const count = Math.max(1, f1 - f0);
+    for (let f = f0; f < f1; f++) {
+      sumE += total[f] ?? 0;
+      sumL += low[f] ?? 0;
+      sumM += mid[f] ?? 0;
+    }
+    rawEnergy.push(sumE / count);
+    rawLow.push(sumL / count);
+    rawMid.push(sumM / count);
+  }
+
+  // Normalize per track while floor-guarding low/mid scales against total energy so
+  // instrumental kick tracks don't amplify negligible mid-band leakage into false vocals.
+  const p95Energy = Math.max(percentile(rawEnergy, 0.95), 1e-4);
+  const p95Low = Math.max(percentile(rawLow, 0.95), p95Energy * 0.25, 1e-4);
+  const p95Mid = Math.max(percentile(rawMid, 0.95), p95Energy * 0.25, 1e-4);
+
+  const bars: BarFeature[] = [];
+  for (let b = 0; b < numBars; b++) {
+    bars.push({
+      energy: clamp01((rawEnergy[b] ?? 0) / p95Energy),
+      low: clamp01((rawLow[b] ?? 0) / p95Low),
+      mid: clamp01((rawMid[b] ?? 0) / p95Mid),
+    });
+  }
+
+  const audibleSpan = Math.max(audible.endSec - audible.startSec, 1);
+  const entries: CueSpot[] = [];
+  const exits: CueSpot[] = [];
+
+  let bestEntryBar = 0;
+  let bestEntryScore = Number.NEGATIVE_INFINITY;
+  let bestExitBar = 0;
+  let bestExitScore = Number.NEGATIVE_INFINITY;
+
+  for (let bar = 0; bar < numBars; bar += 8) {
+    const sec = Math.round((grid.firstDownbeatSec + bar * barSec) * 1000) / 1000;
+    if (sec >= audible.endSec - barSec * 0.5) break;
+
+    const before4 = bar === 0 ? { energy: 0, low: 0, mid: 0 } : averageRange(bars, bar - 4, bar);
+    const before1 = bar === 0 ? { energy: 0, low: 0, mid: 0 } : (bars[bar - 1] ?? before4);
+    const barN = bars[bar] ?? { energy: 0, low: 0, mid: 0 };
+    const after4 = averageRange(bars, bar, bar + 4);
+    const after8 = averageRange(bars, bar, bar + 8);
+    const nextPhrase = averageRange(bars, bar + 8, bar + 16);
+
+    // Boundary novelty between bar n-1 and bar n highlights real section changes
+    const novelty =
+      bar === 0
+        ? barN.energy
+        : Math.abs(barN.energy - before1.energy) +
+          0.7 * Math.abs(barN.low - before1.low) +
+          0.7 * Math.abs(barN.mid - before1.mid);
+
+    const posFrac = clamp01((sec - audible.startSec) / audibleSpan);
+    const barsRemaining = (audible.endSec - sec) / barSec;
+
+    const vocalsSustained = bar > 0 && before4.mid >= 0.42 && after4.mid >= 0.42;
+    const insideDrop =
+      bar > 0 &&
+      before4.energy >= 0.72 &&
+      after4.energy >= 0.72 &&
+      after4.energy - before4.energy > -0.15;
+
+    // --- Entry rating ---
+    let entryQuality: SpotQuality;
+    let entryReason: string;
+    if (vocalsSustained) {
+      entryQuality = "risky";
+      entryReason = "vocals across boundary";
+    } else if (insideDrop) {
+      entryQuality = "risky";
+      entryReason = "inside high-energy drop";
+    } else if (bar > 0 && after4.mid >= 0.55 && before4.energy >= 0.45) {
+      entryQuality = "risky";
+      entryReason = "vocals active here";
+    } else if (barsRemaining < 8 || posFrac > 0.78) {
+      entryQuality = "risky";
+      entryReason = "too late in track";
+    } else {
+      const inFirstThird = bar === 0 || posFrac <= 0.38;
+      const cleanBefore = bar === 0 || (before4.mid < 0.35 && before4.energy < 0.68);
+      const energyRises =
+        after8.energy > before4.energy + 0.04 ||
+        nextPhrase.energy > after8.energy + 0.05 ||
+        (bar === 0 && after8.energy > 0.02);
+      const noImmediateVocals = after4.mid < 0.45;
+
+      if (inFirstThird && cleanBefore && energyRises && noImmediateVocals) {
+        entryQuality = "good";
+        if (bar === 0) {
+          entryReason = "intro, no vocals";
+        } else if (after4.energy - before4.energy >= 0.18) {
+          entryReason = "energy builds, no vocals";
+        } else {
+          entryReason = "clean intro, no vocals";
+        }
+      } else {
+        entryQuality = "ok";
+        if (after4.mid >= 0.45) {
+          entryReason = "vocals enter here";
+        } else if (posFrac > 0.38) {
+          entryReason = "mid-track, short fade";
+        } else {
+          entryReason = "usable with short fade";
+        }
+      }
+    }
+
+    entries.push({ bar, sec, quality: entryQuality, reason: entryReason });
+
+    const entryBase = entryQuality === "good" ? 100 : entryQuality === "ok" ? 40 : 0;
+    const entryScore =
+      entryBase +
+      (1 - before4.mid) * 20 +
+      (1 - after4.mid) * 18 +
+      (1 - before4.energy) * 12 +
+      Math.max(0, after8.energy - before4.energy) * 25 +
+      Math.min(1, novelty) * 18 +
+      (posFrac <= 0.35 ? (1 - posFrac) * 18 : -posFrac * 30) +
+      (after4.energy >= 0.2 ? 8 : 0);
+
+    if (entryScore > bestEntryScore) {
+      bestEntryScore = entryScore;
+      bestEntryBar = bar;
+    }
+
+    // --- Exit rating ---
+    let exitQuality: SpotQuality;
+    let exitReason: string;
+    if (vocalsSustained) {
+      exitQuality = "risky";
+      exitReason = "vocals across boundary";
+    } else if (insideDrop) {
+      exitQuality = "risky";
+      exitReason = "inside high-energy drop";
+    } else if (barsRemaining < 7.5) {
+      exitQuality = "risky";
+      exitReason = "too close to end";
+    } else {
+      const hasRoom = barsRemaining >= 15.5;
+      const energyFalls =
+        before4.energy - after8.energy >= 0.12 ||
+        (after8.energy < 0.52 && before4.energy - after8.energy >= 0.05);
+      const vocalsFall = before4.mid - after4.mid >= 0.18 && after4.mid < 0.4;
+
+      if (bar > 0 && hasRoom && (energyFalls || vocalsFall) && after4.mid < 0.42) {
+        exitQuality = "good";
+        if (energyFalls && vocalsFall) {
+          exitReason = "outro, vocals clear";
+        } else if (vocalsFall) {
+          exitReason = "vocals end here";
+        } else {
+          exitReason = "energy drops, clean outro";
+        }
+      } else {
+        exitQuality = "ok";
+        if (!hasRoom && after4.mid < 0.42) {
+          exitReason = "short outro, quick fade";
+        } else if (bar === 0) {
+          exitReason = "track start";
+        } else {
+          exitReason = "usable with short fade";
+        }
+      }
+    }
+
+    exits.push({ bar, sec, quality: exitQuality, reason: exitReason });
+
+    const exitBase = exitQuality === "good" ? 100 : exitQuality === "ok" ? 40 : 0;
+    const positionBonus =
+      posFrac >= 0.5 && posFrac <= 0.92
+        ? 25 + posFrac * 15
+        : posFrac < 0.25
+          ? -45
+          : 0;
+    const exitScore =
+      exitBase +
+      Math.max(0, before4.energy - after8.energy) * 30 +
+      Math.max(0, before4.mid - after4.mid) * 28 +
+      Math.min(1, novelty) * 18 +
+      (1 - after4.mid) * 15 +
+      positionBonus +
+      (barsRemaining >= 15.5 ? 12 : -15);
+
+    if (exitScore > bestExitScore) {
+      bestExitScore = exitScore;
+      bestExitBar = bar;
+    }
+  }
+
+  if (entries.length === 0 || exits.length === 0) {
+    return {
+      bpm: gridRes.bpm,
+      cues: buildFallbackCues(audible.startSec, audible.endSec),
+    };
+  }
+
+  return {
+    bpm: gridRes.bpm,
+    cues: {
+      version: TRACK_CUES_VERSION,
+      grid,
+      entries,
+      exits,
+      bestEntryBar,
+      bestExitBar,
+      confidence,
+    },
+  };
+}
+
+/**
+ * Full offline track analysis: computes multi-band envelopes, beat grid, downbeat,
+ * phrase boundaries, and entry/exit cue ratings.
+ */
+export function analyzeTrackCues(
+  channelData: Float32Array,
+  sampleRate: number,
+): { bpm: number | null; cues: TrackCues } {
+  const envelopes = computeBandEnvelopes(channelData, sampleRate);
+  return analyzeTrackCuesFromEnvelopes(envelopes);
+}
+
+export function findCueSpot(spots: CueSpot[], bar: number | null): CueSpot | null {
+  if (spots.length === 0) return null;
+  if (bar !== null) {
+    const found = spots.find((s) => s.bar === bar);
+    if (found) return found;
+  }
+  return spots[0] ?? null;
+}
+
+/**
+ * Returns the live deck's active exit flag: normally `bestExitBar`, advancing to the
+ * next good (then ok, then any) exit if the playhead has passed the suggested flag.
+ */
+export function getActiveExitSpot(
+  cues: TrackCues | null,
+  currentTimeSec: number,
+): CueSpot | null {
+  if (!cues || cues.exits.length === 0) return null;
+  const suggested = findCueSpot(cues.exits, cues.bestExitBar);
+  if (suggested && currentTimeSec <= suggested.sec + 0.05) {
+    return suggested;
+  }
+
+  const upcomingGood = cues.exits.find(
+    (s) => s.sec > currentTimeSec + 0.05 && s.quality === "good",
+  );
+  if (upcomingGood) return upcomingGood;
+
+  const upcomingOk = cues.exits.find(
+    (s) => s.sec > currentTimeSec + 0.05 && s.quality === "ok",
+  );
+  if (upcomingOk) return upcomingOk;
+
+  const upcomingAny = cues.exits.find((s) => s.sec > currentTimeSec + 0.05);
+  return upcomingAny ?? suggested;
+}
+
+/**
+ * Computes the timestamp of the next bar downbeat (beat 1) strictly after `currentTimeSec`
+ * (at most one bar ahead).
+ */
+export function getNextBeatOneSec(grid: BeatGrid, currentTimeSec: number): number {
+  const barSec = (4 * 60) / grid.bpm;
+  if (currentTimeSec < grid.firstDownbeatSec - 0.01) {
+    return grid.firstDownbeatSec;
+  }
+  const barsElapsed = Math.floor((currentTimeSec - grid.firstDownbeatSec) / barSec);
+  return grid.firstDownbeatSec + (barsElapsed + 1) * barSec;
+}
+
+/**
+ * Evaluates the exit quality of the phrase containing `timeSec` (used to tint Fade to X).
+ */
+export function getExitQualityAtTime(cues: TrackCues | null, timeSec: number): SpotQuality {
+  if (!cues || !cues.grid || cues.exits.length === 0) return "ok";
+  let active = cues.exits[0];
+  for (const spot of cues.exits) {
+    if (spot.sec <= timeSec + 0.1) {
+      active = spot;
+    } else {
+      break;
+    }
+  }
+  return active?.quality ?? "ok";
+}
+
 /**
  * Estimates tempo (BPM) from a mono PCM Float32Array using a ~100 Hz energy-onset
  * envelope + autocorrelation over the whole track across the 70–175 BPM range.
