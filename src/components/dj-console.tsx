@@ -55,6 +55,7 @@ import {
 } from "@/lib/library-loader";
 import { searchTracks } from "@/lib/search";
 import { cn } from "@/lib/utils";
+import type { DeckDrop } from "@/lib/track-drag";
 import { useTheme } from "@/hooks/use-theme";
 import { useMedia } from "@/hooks/use-media";
 import { usePwaInstall } from "@/hooks/use-pwa-install";
@@ -1018,21 +1019,6 @@ export function DjConsole({
     [deckA.track, deckB.track, flashDeck, idleDeck, isMixing, liveDeck, playedIds],
   );
 
-  const handleDropTrack = useCallback(
-    (deck: DeckId, trackId: string) => {
-      const track = tracksRef.current.find((t) => t.id === trackId);
-      if (!track) return;
-      if (deck !== idleDeck) {
-        toast.error("Cannot overwrite the ON AIR deck while it is playing.");
-        return;
-      }
-      handleLoadNext(track);
-    },
-    [handleLoadNext, idleDeck],
-  );
-  const handleDropTrackA = useCallback((id: string) => handleDropTrack("A", id), [handleDropTrack]);
-  const handleDropTrackB = useCallback((id: string) => handleDropTrack("B", id), [handleDropTrack]);
-
   const ensureTrackAnalysis = useCallback((track: TrackItem) => {
     analysisScheduler.enqueue(track, "queued");
   }, []);
@@ -1212,6 +1198,24 @@ export function DjConsole({
     [queue, idleDeck, isMixing, liveDeck, idleSnapshot.track, flashDeck],
   );
 
+  const handleDropOnDeck = useCallback(
+    (deck: DeckId, drop: DeckDrop) => {
+      if (deck !== idleDeck) {
+        toast.error("Cannot overwrite the ON AIR deck while it is playing.");
+        return;
+      }
+      if (drop.kind === "queue") {
+        handleLoadFromQueue(drop.index);
+        return;
+      }
+      const track = tracksRef.current.find((t) => t.id === drop.trackId);
+      if (track) handleLoadNext(track);
+    },
+    [handleLoadFromQueue, handleLoadNext, idleDeck],
+  );
+  const handleDropTrackA = useCallback((drop: DeckDrop) => handleDropOnDeck("A", drop), [handleDropOnDeck]);
+  const handleDropTrackB = useCallback((drop: DeckDrop) => handleDropOnDeck("B", drop), [handleDropOnDeck]);
+
   const handleMoveQueue = useCallback((from: number, to: number) => {
     setQueue((prev) => {
       if (to < 0 || to >= prev.length) return prev;
@@ -1331,6 +1335,10 @@ export function DjConsole({
               step={1}
               value={[Math.round(masterVolume * 100)]}
               onValueChange={(vals) => djEngine.setMasterVolume((vals[0] ?? 85) / 100)}
+              onValueCommit={() => {
+                // Release focus after a pointer drag so ←/→ go back to the UP NEXT entry flag.
+                if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+              }}
             />
           </div>
 

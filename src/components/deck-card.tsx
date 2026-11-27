@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { WaveformCanvas } from "@/components/waveform-canvas";
-import { TRACK_DRAG_MIME } from "@/lib/track-drag";
+import { QUEUE_DRAG_MIME, isDeckDrag, readDeckDrop, type DeckDrop } from "@/lib/track-drag";
 
 interface DeckCardProps {
   deckId: DeckId;
@@ -40,7 +40,7 @@ interface DeckCardProps {
   onSeek: (ratio: number) => void;
   onToggleLock: () => void;
   /** Accepts a library track dropped onto the deck; omitted when the deck is on air. */
-  onDropTrack?: (trackId: string) => void;
+  onDropTrack?: (drop: DeckDrop) => void;
 }
 
 export const DeckCard = memo(function DeckCard({
@@ -77,7 +77,7 @@ export const DeckCard = memo(function DeckCard({
 
   const [dragOver, setDragOver] = useState(false);
   const acceptsDrag = (e: React.DragEvent) =>
-    Boolean(onDropTrack) && e.dataTransfer.types.includes(TRACK_DRAG_MIME);
+    Boolean(onDropTrack) && isDeckDrag(e);
 
   const glowStrength = Math.min(1, Math.max(0, audibility));
 
@@ -92,17 +92,17 @@ export const DeckCard = memo(function DeckCard({
       onDragOver={(e) => {
         if (!acceptsDrag(e)) return;
         e.preventDefault();
-        e.dataTransfer.dropEffect = "copy";
+        e.dataTransfer.dropEffect = e.dataTransfer.types.includes(QUEUE_DRAG_MIME) ? "move" : "copy";
       }}
       onDragLeave={(e) => {
         if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false);
       }}
       onDrop={(e) => {
         setDragOver(false);
-        const id = e.dataTransfer.getData(TRACK_DRAG_MIME);
-        if (!onDropTrack || !id) return;
+        const drop = readDeckDrop(e);
+        if (!onDropTrack || !drop) return;
         e.preventDefault();
-        onDropTrack(id);
+        onDropTrack(drop);
       }}
     >
       <motion.div

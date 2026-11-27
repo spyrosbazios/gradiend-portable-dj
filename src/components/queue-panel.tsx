@@ -13,7 +13,7 @@ import {
 } from "lucide-react";
 import { evaluateBpmFit, type BpmFit, type DeckId } from "@/core/dj-math";
 import type { TrackItem } from "@/lib/audio-engine";
-import { TRACK_DRAG_MIME } from "@/lib/track-drag";
+import { QUEUE_DRAG_MIME, TRACK_DRAG_MIME, setTrackDragImage } from "@/lib/track-drag";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -156,7 +156,17 @@ function QueueRow({ entry, index, prevBpm, onLoadAt, onRemoveAt }: QueueRowProps
         )}
       </div>
 
-      <div className="min-w-0 flex-1">
+      <div
+          draggable
+          title="Drag onto the UP NEXT deck to load"
+          onDragStart={(e) => {
+            e.dataTransfer.effectAllowed = "move";
+            e.dataTransfer.setData(QUEUE_DRAG_MIME, String(index));
+            e.dataTransfer.setData("text/plain", `${entry.track.artist} - ${entry.track.title}`);
+            setTrackDragImage(e, entry.track.title);
+          }}
+          className="min-w-0 flex-1 cursor-grab active:cursor-grabbing"
+        >
         <div className="truncate text-xs font-medium text-fg">
           {entry.track.title}
         </div>
