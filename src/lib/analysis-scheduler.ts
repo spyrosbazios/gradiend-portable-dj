@@ -1,29 +1,35 @@
 import { get, set } from "idb-keyval";
-import { estimateBpm } from "@/core/dj-math";
+import { analyzeTrackCues, TRACK_CUES_VERSION, type TrackCues } from "@/core/dj-math";
 import type { TrackItem } from "@/lib/audio-engine";
-import { cacheKeyForTrack, type CachedMeta } from "@/lib/library-loader";
+import type { AnalysisWorkerResponse } from "@/lib/analysis.worker";
+import { cacheKeyForTrack, isValidCachedCues, type CachedMeta } from "@/lib/library-loader";
 
-export type BpmPriority = "high" | "queued" | "medium" | "low";
+export type AnalysisPriority = "high" | "queued" | "medium" | "low";
+
+export interface TrackAnalysisResult {
+  bpm: number | null;
+  cues: TrackCues;
+}
 
 interface QueueJob {
   track: TrackItem;
-  priority: BpmPriority;
+  priority: AnalysisPriority;
   order: number;
 }
 
-type BpmResultCallback = (trackId: string, bpm: number) => void;
+type AnalysisResultCallback = (trackId: string, bpm: number | null, cues: TrackCues) => void;
 
-const PRIORITY_RANK: Record<BpmPriority, number> = {
+const PRIORITY_RANK: Record<AnalysisPriority, number> = {
   high: 0,
   queued: 1,
   medium: 2,
   low: 3,
 };
 
-class BpmWorkerClient {
+class AnalysisWorkerClient {
   private worker: Worker | null = null;
   private seq = 0;
-  private pending = new Map<number, (bpm: number | null) => void>();
+  private pending = new Map<number, (result: TrackAnalysisResult | null) => void>();
 
   private resetWorker(): void {
     if (this.worker) {
@@ -40,14 +46,14 @@ class BpmWorkerClient {
     if (typeof Worker === "undefined") return null;
     if (!this.worker) {
       try {
-        this.worker = new Worker(new URL("./bpm.worker.ts", import.meta.url), {
+        this.worker = new Worker(new URL("./analysis.worker.ts", import.meta.url), {
           type: "module",
         });
-        this.worker.addEventListener("message", (e: MessageEvent<{ id: number; bpm: number | null }>) => {
+        this.worker.addEventListener("message", (e: MessageEvent<AnalysisWorkerResponse>) => {
           const resolve = this.pending.get(e.data.id);
           if (resolve) {
             this.pending.delete(e.data.id);
-            resolve(e.data.bpm);
+            resolve({ bpm: e.data.bpm, cues: e.data.cues });
           }
         });
         this.worker.addEventListener("error", () => {
@@ -64,29 +70,28 @@ class BpmWorkerClient {
     return this.worker;
   }
 
-  compute(channelData: Float32Array, sampleRate: number): Promise<number | null> {
-    if (sampleRate <= 0 || channelData.length < sampleRate * 4) {
-      return Promise.resolve(null);
+  analyze(channelData: Float32Array, sampleRate: number): Promise<TrackAnalysisResult> {
+    if (sampleRate <= 0 || channelData.length === 0) {
+      return Promise.resolve(analyzeTrackCues(channelData, sampleRate));
     }
-
-    // Slice ONLY the 28s middle window used by estimateBpm (~2.4 MB vs ~25 MB full song)
-    const maxSamples = Math.min(channelData.length, Math.floor(sampleRate * 28));
-    const startOffset = Math.max(0, Math.floor((channelData.length - maxSamples) / 2));
-    const slice = channelData.slice(startOffset, startOffset + maxSamples);
 
     const worker = this.ensureWorker();
     if (!worker) {
-      return Promise.resolve(estimateBpm(slice, sampleRate));
+      return Promise.resolve(analyzeTrackCues(channelData, sampleRate));
     }
 
+    // Copy into a transferable buffer so we never detach AudioBuffer's internal storage
+    const copy = channelData.slice();
     const id = ++this.seq;
     return new Promise((resolve) => {
-      this.pending.set(id, resolve);
+      this.pending.set(id, (res) => {
+        resolve(res ?? analyzeTrackCues(channelData, sampleRate));
+      });
       try {
-        worker.postMessage({ id, samples: slice, sampleRate }, [slice.buffer]);
+        worker.postMessage({ id, samples: copy, sampleRate }, [copy.buffer]);
       } catch {
         this.pending.delete(id);
-        resolve(estimateBpm(slice, sampleRate));
+        resolve(analyzeTrackCues(channelData, sampleRate));
       }
     });
   }
@@ -106,7 +111,11 @@ function yieldIdle(ms: number): Promise<void> {
   });
 }
 
-export class BpmScheduler {
+function needsAnalysis(track: TrackItem): boolean {
+  return track.cues === null || track.cues.version !== TRACK_CUES_VERSION;
+}
+
+export class AnalysisScheduler {
   private queue: QueueJob[] = [];
   private queuedMap = new Map<string, QueueJob>();
   private completedIds = new Set<string>();
@@ -114,32 +123,55 @@ export class BpmScheduler {
   private generation = 0;
   private pauseUntilTs = 0;
   private pausedForFade = false;
-  private activeAbort: { priority: BpmPriority; controller: AbortController } | null = null;
-  private workerClient = new BpmWorkerClient();
-  private onResult: BpmResultCallback | null = null;
+  private activeAbort: { priority: AnalysisPriority; controller: AbortController } | null = null;
+  private workerClient = new AnalysisWorkerClient();
+  private onResult: AnalysisResultCallback | null = null;
 
-  setListener(cb: BpmResultCallback | null): void {
+  setListener(cb: AnalysisResultCallback | null): void {
     this.onResult = cb;
   }
 
   /**
-   * Computes BPM off the main thread in the shared Web Worker.
+   * Computes BPM and transition cues off the main thread in the shared Web Worker.
    */
-  computeInWorker(channelData: Float32Array, sampleRate: number): Promise<number | null> {
-    return this.workerClient.compute(channelData, sampleRate);
+  analyzeInWorker(channelData: Float32Array, sampleRate: number): Promise<TrackAnalysisResult> {
+    return this.workerClient.analyze(channelData, sampleRate);
   }
 
   /**
-   * Records a BPM already computed during deck loading so background scanning
-   * never decodes the same file twice and caches it to IndexedDB immediately.
+   * Reads cached BPM + cues from IndexedDB if the stored cue version matches the current schema.
    */
-  recordResult(track: TrackItem, bpm: number, duration?: number): void {
+  async getCachedAnalysis(track: TrackItem): Promise<TrackAnalysisResult | null> {
+    try {
+      const cached = await get<CachedMeta>(cacheKeyForTrack(track));
+      if (cached && isValidCachedCues(cached.cues)) {
+        return {
+          bpm: cached.bpm ?? track.bpm,
+          cues: cached.cues,
+        };
+      }
+    } catch {
+      // ignore cache read errors
+    }
+    return null;
+  }
+
+  /**
+   * Records analysis results already computed during deck loading so background scanning
+   * never decodes the same file twice and caches them to IndexedDB immediately.
+   */
+  recordResult(
+    track: TrackItem,
+    bpm: number | null,
+    cues: TrackCues,
+    duration?: number,
+  ): void {
     this.completedIds.add(track.id);
     if (this.queuedMap.has(track.id)) {
       this.queuedMap.delete(track.id);
       this.queue = this.queue.filter((j) => j.track.id !== track.id);
     }
-    this.onResult?.(track.id, bpm);
+    this.onResult?.(track.id, bpm, cues);
     const key = cacheKeyForTrack(track);
     void (async () => {
       try {
@@ -148,9 +180,10 @@ export class BpmScheduler {
           title: existing?.title ?? track.title,
           artist: existing?.artist ?? track.artist,
           duration: existing?.duration ?? duration ?? track.duration,
-          bpm,
+          bpm: bpm ?? existing?.bpm ?? track.bpm,
+          cues,
           coverUrl: existing?.coverUrl ?? track.coverUrl,
-        });
+        } satisfies CachedMeta);
       } catch {
         // ignore quota errors
       }
@@ -193,7 +226,6 @@ export class BpmScheduler {
    * from earlier scroll positions so fast scrolling never backs up.
    */
   setFocusWindow(selected: TrackItem, neighbors: TrackItem[]): void {
-    // Demote any previous focus-window jobs back to low priority
     for (const job of this.queue) {
       if (job.priority === "high" || job.priority === "medium") {
         job.priority = "low";
@@ -202,21 +234,20 @@ export class BpmScheduler {
     }
 
     let promoted = false;
-    if (selected.bpm === null && !this.completedIds.has(selected.id)) {
+    if (needsAnalysis(selected) && !this.completedIds.has(selected.id)) {
       this.upsertJob(selected, "high", 0);
       promoted = true;
     }
 
     for (let i = 0; i < neighbors.length; i++) {
       const neighbor = neighbors[i];
-      if (!neighbor || neighbor.bpm !== null || this.completedIds.has(neighbor.id)) continue;
+      if (!neighbor || !needsAnalysis(neighbor) || this.completedIds.has(neighbor.id)) continue;
       this.upsertJob(neighbor, "medium", i + 1);
       promoted = true;
     }
 
     if (promoted) {
       this.sortQueue();
-      // If we are currently fetching a low-priority background track, abort it so focus wins immediately
       if (this.activeAbort?.priority === "low") {
         this.activeAbort.controller.abort();
       }
@@ -226,8 +257,8 @@ export class BpmScheduler {
     }
   }
 
-  enqueue(track: TrackItem, priority: BpmPriority): void {
-    if (track.bpm !== null || this.completedIds.has(track.id)) return;
+  enqueue(track: TrackItem, priority: AnalysisPriority): void {
+    if (!needsAnalysis(track) || this.completedIds.has(track.id)) return;
     this.upsertJob(track, priority, priority === "high" ? 0 : 10);
     this.sortQueue();
     if (!this.running) {
@@ -235,11 +266,11 @@ export class BpmScheduler {
     }
   }
 
-  enqueueMany(tracks: TrackItem[], priority: BpmPriority): void {
+  enqueueMany(tracks: TrackItem[], priority: AnalysisPriority): void {
     let added = false;
     for (let i = 0; i < tracks.length; i++) {
       const track = tracks[i];
-      if (!track || track.bpm !== null || this.completedIds.has(track.id)) continue;
+      if (!track || !needsAnalysis(track) || this.completedIds.has(track.id)) continue;
       this.upsertJob(track, priority, 100 + i);
       added = true;
     }
@@ -251,7 +282,7 @@ export class BpmScheduler {
     }
   }
 
-  private upsertJob(track: TrackItem, priority: BpmPriority, order: number): void {
+  private upsertJob(track: TrackItem, priority: AnalysisPriority, order: number): void {
     const existing = this.queuedMap.get(track.id);
     if (existing) {
       if (
@@ -303,18 +334,16 @@ export class BpmScheduler {
         if (this.generation !== gen) break;
 
         if (result === "aborted") {
-          // Put the interrupted low-priority job back so it finishes later
           this.upsertJob(job.track, "low", 1000);
           this.sortQueue();
           continue;
         }
 
         this.completedIds.add(job.track.id);
-        if (typeof result === "number") {
-          this.onResult?.(job.track.id, result);
+        if (result !== null) {
+          this.onResult?.(job.track.id, result.bpm, result.cues);
         }
 
-        // Fast turnaround for focus window; gentle breather for background trickle (400-song friendly)
         const delayMs =
           job.priority === "high" || job.priority === "queued"
             ? 12
@@ -331,11 +360,13 @@ export class BpmScheduler {
   private async analyzeOne(
     track: TrackItem,
     signal: AbortSignal,
-  ): Promise<number | null | "aborted"> {
+  ): Promise<TrackAnalysisResult | null | "aborted"> {
     const key = cacheKeyForTrack(track);
     try {
       const cached = await get<CachedMeta>(key);
-      if (cached?.bpm) return cached.bpm;
+      if (cached && isValidCachedCues(cached.cues)) {
+        return { bpm: cached.bpm ?? track.bpm, cues: cached.cues };
+      }
     } catch {
       // ignore cache read errors
     }
@@ -355,26 +386,27 @@ export class BpmScheduler {
       const audioBuf = await offlineCtx.decodeAudioData(arrayBuf);
       if (signal.aborted) return "aborted";
 
-      const bpm = await this.workerClient.compute(
+      const result = await this.workerClient.analyze(
         audioBuf.getChannelData(0),
         audioBuf.sampleRate,
       );
+      const effectiveBpm = result.bpm ?? track.bpm;
 
-      if (bpm !== null) {
-        try {
-          const existing = await get<CachedMeta>(key);
-          await set(key, {
-            title: existing?.title ?? track.title,
-            artist: existing?.artist ?? track.artist,
-            duration: existing?.duration ?? audioBuf.duration ?? track.duration,
-            bpm,
-            coverUrl: existing?.coverUrl ?? track.coverUrl,
-          });
-        } catch {
-          // ignore quota errors
-        }
+      try {
+        const existing = await get<CachedMeta>(key);
+        await set(key, {
+          title: existing?.title ?? track.title,
+          artist: existing?.artist ?? track.artist,
+          duration: existing?.duration ?? audioBuf.duration ?? track.duration,
+          bpm: effectiveBpm ?? existing?.bpm ?? null,
+          cues: result.cues,
+          coverUrl: existing?.coverUrl ?? track.coverUrl,
+        } satisfies CachedMeta);
+      } catch {
+        // ignore quota errors
       }
-      return bpm;
+
+      return { bpm: effectiveBpm, cues: result.cues };
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
         return "aborted";
@@ -384,4 +416,4 @@ export class BpmScheduler {
   }
 }
 
-export const bpmScheduler = new BpmScheduler();
+export const analysisScheduler = new AnalysisScheduler();

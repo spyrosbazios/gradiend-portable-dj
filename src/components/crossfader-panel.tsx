@@ -1,6 +1,6 @@
 import { memo } from "react";
 import { ArrowLeft, ArrowLeftRight, ArrowRight, Sparkles } from "lucide-react";
-import type { DeckId, MixMode } from "@/core/dj-math";
+import type { DeckId, MixMode, SpotQuality } from "@/core/dj-math";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Slider } from "@/components/ui/slider";
@@ -11,6 +11,7 @@ interface CrossfaderPanelProps {
   fadeSeconds: number;
   mixMode: MixMode;
   transitionLabel: string | null;
+  nextBeatQuality: SpotQuality | null;
   nextDeck: DeckId;
   canAutoFade: boolean;
   onCrossfadeChange: (val: number) => void;
@@ -45,6 +46,7 @@ export const CrossfaderPanel = memo(function CrossfaderPanel({
   fadeSeconds,
   mixMode,
   transitionLabel,
+  nextBeatQuality,
   nextDeck,
   canAutoFade,
   onCrossfadeChange,
@@ -52,29 +54,35 @@ export const CrossfaderPanel = memo(function CrossfaderPanel({
   onFadeSecondsChange,
   onMixModeChange,
 }: CrossfaderPanelProps) {
+  const isGoodNextBeat = nextBeatQuality === "good";
+  const hasLiveQuality = nextBeatQuality !== null;
+
   return (
     <section
       aria-label="Crossfader Mixer"
       className="flex flex-col items-center justify-between gap-2.5 rounded-xl border border-line bg-card p-3.5"
     >
-      <div className="flex w-full items-center justify-between gap-1.5 text-[11px] font-bold tracking-wider text-dim">
-        <span className="inline-flex items-center gap-1.5">
-          <ArrowLeftRight className="size-3.5" />
-          <span>CROSSFADER</span>
-        </span>
+      <div className="flex w-full flex-col gap-1.5">
+        <div className="flex w-full items-center justify-between gap-1.5 text-[11px] font-bold tracking-wider text-dim">
+          <span className="inline-flex items-center gap-1.5">
+            <ArrowLeftRight className="size-3.5" />
+            <span>CROSSFADER</span>
+          </span>
+        </div>
+
         {transitionLabel && (
-          <span
-            title={isAutoFading ? "Active mix transition" : "Next mix transition"}
+          <div
+            title={isAutoFading ? "Active mix transition" : "Upcoming mix move"}
             className={cn(
-              "inline-flex max-w-[104px] items-center gap-1 truncate rounded-full px-1.5 py-0.5 text-[9px] font-semibold tracking-normal",
+              "inline-flex w-full items-center justify-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-semibold tabular-nums",
               isAutoFading
-                ? "bg-brand-soft text-brand animate-pulse"
-                : "bg-raised text-dim",
+                ? "border-brand-line bg-brand-soft text-brand animate-pulse"
+                : "border-brand-line bg-brand-soft text-brand",
             )}
           >
-            <Sparkles className="size-2.5 shrink-0" />
+            <Sparkles className="size-3 shrink-0" />
             <span className="truncate">{transitionLabel}</span>
-          </span>
+          </div>
         )}
       </div>
 
@@ -100,16 +108,24 @@ export const CrossfaderPanel = memo(function CrossfaderPanel({
           onClick={onAutoFade}
           className={cn(
             "w-full gap-1.5 font-semibold",
-            nextDeck === "A"
-              ? "bg-deck-a text-bg hover:bg-deck-a/90"
-              : "bg-deck-b text-bg hover:bg-deck-b/90",
+            hasLiveQuality
+              ? isGoodNextBeat
+                ? "bg-up text-bg hover:bg-up/90"
+                : "bg-warn text-bg hover:bg-warn/90"
+              : nextDeck === "A"
+                ? "bg-deck-a text-bg hover:bg-deck-a/90"
+                : "bg-deck-b text-bg hover:bg-deck-b/90",
           )}
         >
           {nextDeck === "A" && (
             <ArrowLeft className={cn("size-4 shrink-0", isAutoFading && "animate-pulse")} />
           )}
-          <span>
-            {isAutoFading ? `Fading to ${nextDeck}…` : `Fade to ${nextDeck}`}
+          <span className="truncate">
+            {isAutoFading
+              ? `Fading to ${nextDeck}…`
+              : isGoodNextBeat
+                ? `Fade to ${nextDeck} · good now`
+                : `Fade to ${nextDeck}`}
           </span>
           {!isAutoFading && (
             <kbd className="hidden rounded bg-bg/20 px-1 py-0.5 font-mono text-[9px] font-bold tracking-tight uppercase sm:inline-flex">

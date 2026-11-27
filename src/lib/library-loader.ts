@@ -1,6 +1,11 @@
 import { get, getMany, set } from "idb-keyval";
 import { parseBlob } from "music-metadata";
-import { isAudioFile, parseFilenameMetadata } from "@/core/dj-math";
+import {
+  isAudioFile,
+  parseFilenameMetadata,
+  TRACK_CUES_VERSION,
+  type TrackCues,
+} from "@/core/dj-math";
 import type { TrackItem } from "@/lib/audio-engine";
 import { FOLDER_HANDLE_KEY, META_CACHE_PREFIX } from "@/lib/storage-keys";
 
@@ -9,7 +14,19 @@ export interface CachedMeta {
   artist: string;
   duration: number | null;
   bpm: number | null;
+  cues?: TrackCues | null;
   coverUrl: string | null;
+}
+
+export function isValidCachedCues(cues: unknown): cues is TrackCues {
+  return (
+    cues !== null &&
+    typeof cues === "object" &&
+    "version" in cues &&
+    (cues as TrackCues).version === TRACK_CUES_VERSION &&
+    Array.isArray((cues as TrackCues).entries) &&
+    Array.isArray((cues as TrackCues).exits)
+  );
 }
 
 interface DirHandleLike {
@@ -40,6 +57,7 @@ export async function hydrateCachedLibrary(tracks: TrackItem[]): Promise<TrackIt
         artist: cached.artist || track.artist,
         duration: cached.duration ?? track.duration,
         bpm: cached.bpm ?? track.bpm,
+        cues: isValidCachedCues(cached.cues) ? cached.cues : track.cues,
         coverUrl: cached.coverUrl ?? track.coverUrl,
         metadataLoaded: true,
       };
@@ -65,6 +83,7 @@ export function filesToTrackItems(files: File[]): TrackItem[] {
       artist: parsed.artist,
       duration: null,
       bpm: null,
+      cues: null,
       coverUrl: null,
       metadataLoaded: false,
     };
@@ -188,6 +207,7 @@ export async function hydrateTrackMetadata(track: TrackItem): Promise<Partial<Tr
         artist: cached.artist,
         duration: cached.duration,
         bpm: cached.bpm ?? null,
+        cues: isValidCachedCues(cached.cues) ? cached.cues : null,
         coverUrl: cached.coverUrl,
         metadataLoaded: true,
       };
@@ -219,7 +239,17 @@ export async function hydrateTrackMetadata(track: TrackItem): Promise<Partial<Tr
       coverUrl = await resizeCoverToDataUrl(pic.data, pic.format);
     }
 
-    const toCache: CachedMeta = { title, artist, duration, bpm, coverUrl };
+    let existingCues: TrackCues | null = track.cues;
+    try {
+      const existing = await get<CachedMeta>(key);
+      if (existing && isValidCachedCues(existing.cues)) {
+        existingCues = existing.cues;
+      }
+    } catch {
+      // ignore read errors
+    }
+
+    const toCache: CachedMeta = { title, artist, duration, bpm, cues: existingCues, coverUrl };
     try {
       await set(key, toCache);
     } catch {
