@@ -309,9 +309,22 @@ export function DjConsole({
   // Harmonic fit of the UP NEXT track against the live one (Camelot wheel).
   const nextKeyFit = keyFit(liveSnapshot?.cues?.key ?? null, idleSnapshot.cues?.key ?? null);
 
+  // Spyros can cancel the auto mix-out for the current live track; keyed by deck+track so the
+  // next track gets its flag back automatically.
+  const [skippedMixOutKey, setSkippedMixOutKey] = useState<string | null>(null);
+  const liveMixOutKey = liveDeck && liveSnapshot?.track ? `${liveDeck}:${liveSnapshot.track.id}` : null;
+  const mixOutSkipped = liveMixOutKey !== null && skippedMixOutKey === liveMixOutKey;
+  const handleToggleMixOut = useCallback(() => {
+    if (!liveMixOutKey) return;
+    setSkippedMixOutKey((prev) => (prev === liveMixOutKey ? null : liveMixOutKey));
+  }, [liveMixOutKey]);
+
   const liveExitSpot = useMemo(
-    () => (liveSnapshot ? getActiveExitSpot(liveSnapshot.cues, liveSnapshot.currentTime) : null),
-    [liveSnapshot],
+    () =>
+      liveSnapshot && !mixOutSkipped
+        ? getActiveExitSpot(liveSnapshot.cues, liveSnapshot.currentTime)
+        : null,
+    [liveSnapshot, mixOutSkipped],
   );
 
   const idleEntrySpot = useMemo(
@@ -385,6 +398,7 @@ export function DjConsole({
   const transitionBadgeLabel = useMemo(() => {
     if (activeTransitionLabel) return activeTransitionLabel;
     if (!upcomingTransitionPlan) return null;
+    if (mixOutSkipped) return "Auto mix-out off for this track";
     if (liveSnapshot?.isPlaying && liveExitSpot) {
       const secsUntilFlag = Math.max(0, liveExitSpot.sec - liveSnapshot.currentTime);
       return `In ${formatCountdown(secsUntilFlag)} · ${upcomingTransitionPlan.label}`;
@@ -397,6 +411,7 @@ export function DjConsole({
     liveSnapshot?.isPlaying,
     liveSnapshot?.currentTime,
     liveExitSpot,
+    mixOutSkipped,
   ]);
 
   const nextBeatQuality: SpotQuality | null = useMemo(() => {
@@ -445,12 +460,14 @@ export function DjConsole({
     : deckB.duration > 0;
 
   const exitSpotA = useMemo(
-    () => (liveDeck === "A" ? getActiveExitSpot(deckA.cues, deckA.currentTime) : null),
-    [liveDeck, deckA.cues, deckA.currentTime],
+    () =>
+      liveDeck === "A" && !mixOutSkipped ? getActiveExitSpot(deckA.cues, deckA.currentTime) : null,
+    [liveDeck, deckA.cues, deckA.currentTime, mixOutSkipped],
   );
   const exitSpotB = useMemo(
-    () => (liveDeck === "B" ? getActiveExitSpot(deckB.cues, deckB.currentTime) : null),
-    [liveDeck, deckB.cues, deckB.currentTime],
+    () =>
+      liveDeck === "B" && !mixOutSkipped ? getActiveExitSpot(deckB.cues, deckB.currentTime) : null,
+    [liveDeck, deckB.cues, deckB.currentTime, mixOutSkipped],
   );
 
   const handlePlayDeck = useCallback(
@@ -763,7 +780,7 @@ export function DjConsole({
   //    a random unplayed cached track with a close BPM and stage it on the idle deck.
   // 2) Trigger auto-mix at `exitFlag.sec - lead` so startAutoFade lands cleanly on beat 1.
   useEffect(() => {
-    if (!autoPlayEnabled || isMixing || !liveDeck || !liveSnapshot?.track) return;
+    if (!autoPlayEnabled || mixOutSkipped || isMixing || !liveDeck || !liveSnapshot?.track) return;
 
     const plannedFadeSec = upcomingTransitionPlan
       ? upcomingTransitionPlan.durationMs / 1000
@@ -839,6 +856,7 @@ export function DjConsole({
     }
   }, [
     autoPlayEnabled,
+    mixOutSkipped,
     isMixing,
     liveDeck,
     liveSnapshot,
@@ -1370,6 +1388,12 @@ export function DjConsole({
               mixMode={mixMode}
               transitionLabel={transitionBadgeLabel}
               nextBeatQuality={nextBeatQuality}
+              mixOutSkipped={mixOutSkipped}
+              onToggleMixOut={
+                autoPlayEnabled && liveSnapshot?.isPlaying && !isAutoFading
+                  ? handleToggleMixOut
+                  : undefined
+              }
               nextDeck={idleDeck}
               canAutoFade={Boolean(idleSnapshot.track)}
               onCrossfadeChange={handleCrossfadeChange}
@@ -1466,6 +1490,12 @@ export function DjConsole({
                   mixMode={mixMode}
                   transitionLabel={transitionBadgeLabel}
                   nextBeatQuality={nextBeatQuality}
+              mixOutSkipped={mixOutSkipped}
+              onToggleMixOut={
+                autoPlayEnabled && liveSnapshot?.isPlaying && !isAutoFading
+                  ? handleToggleMixOut
+                  : undefined
+              }
                   nextDeck={idleDeck}
                   canAutoFade={Boolean(idleSnapshot.track)}
                   onCrossfadeChange={handleCrossfadeChange}

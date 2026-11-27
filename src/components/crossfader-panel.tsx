@@ -1,6 +1,6 @@
 import { memo, useCallback, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { motion } from "framer-motion";
-import { ArrowLeft, ArrowLeftRight, ArrowRight, Sparkles } from "lucide-react";
+import { ArrowLeft, ArrowLeftRight, ArrowRight, RotateCcw, Sparkles, X } from "lucide-react";
 import {
   FADE_BAR_OPTIONS,
   type DeckId,
@@ -18,6 +18,9 @@ interface CrossfaderPanelProps {
   mixMode: MixMode;
   transitionLabel: string | null;
   nextBeatQuality: SpotQuality | null;
+  mixOutSkipped: boolean;
+  /** Cancels or restores the automatic mix-out for the live track; absent when not applicable. */
+  onToggleMixOut?: () => void;
   nextDeck: DeckId;
   canAutoFade: boolean;
   onCrossfadeChange: (val: number) => void;
@@ -196,6 +199,8 @@ export const CrossfaderPanel = memo(function CrossfaderPanel({
   mixMode,
   transitionLabel,
   nextBeatQuality,
+  mixOutSkipped,
+  onToggleMixOut,
   nextDeck,
   canAutoFade,
   onCrossfadeChange,
@@ -231,6 +236,17 @@ export const CrossfaderPanel = memo(function CrossfaderPanel({
           >
             <Sparkles className="size-3 shrink-0" />
             <span className="truncate">{transitionLabel}</span>
+            {onToggleMixOut && (
+              <button
+                type="button"
+                onClick={onToggleMixOut}
+                aria-label={mixOutSkipped ? "Restore auto mix-out" : "Cancel auto mix-out"}
+                title={mixOutSkipped ? "Restore auto mix-out" : "Cancel auto mix-out for this track"}
+                className="-my-1 -mr-1.5 ml-auto inline-flex size-6 shrink-0 items-center justify-center rounded hover:bg-brand-line"
+              >
+                {mixOutSkipped ? <RotateCcw className="size-3.5" /> : <X className="size-3.5" />}
+              </button>
+            )}
           </div>
         )}
       </div>
