@@ -80,6 +80,7 @@ interface DjConsoleProps {
 }
 
 const AUTO_FADE_LEAD_BUFFER_SEC = 2.5;
+const MANUAL_MIX_EJECT_DELAY_MS = 3000;
 const MIX_MODE_STORAGE_KEY = "portable-dj:mix-mode";
 const trackCollator = new Intl.Collator(undefined, { sensitivity: "base" });
 
@@ -482,12 +483,26 @@ export function DjConsole({
     [flashDeck],
   );
 
+  // A deck we just mixed away from is done: empty it so the DJ picks what goes there next
+  // (the queue head is staged straight away if there is one).
+  const retireDeck = useCallback(
+    (deck: DeckId) => {
+      djEngine.unloadTrack(deck);
+      stageNextFromQueue(deck);
+    },
+    [stageNextFromQueue],
+  );
+
   // Dead-air recovery: if the live song ever reaches `ended` while Auto-Play is ON
   // (e.g. very short track, manual scrub near end, or toggled on late), immediately
   // start the staged deck or auto-pick the next close-BPM track so the room never goes silent.
   useEffect(() => {
     djEngine.setOnDeckEnded((endedDeck) => {
-      if (!autoPlayRef.current) return;
+      const autoPlay = autoPlayRef.current;
+      const otherHasTrack = djEngine.getDeck(endedDeck === "A" ? "B" : "A").track !== null;
+      // Without Auto-Play, a loaded next deck or a queue means the DJ has decided — respect it.
+      // Only an empty next deck and an empty queue fall through to the library safety net.
+      if (!autoPlay && (otherHasTrack || queueRef.current.length > 0)) return;
       autoFadeTriggeredForRef.current = null;
       autoPickTriggeredForRef.current = null;
 
@@ -499,7 +514,7 @@ export function DjConsole({
         djEngine.setCrossfade(otherDeck === "A" ? 0 : 1, false);
         void djEngine.play(otherDeck).then((ok) => {
           if (ok) {
-            stageNextFromQueue(endedDeck);
+            retireDeck(endedDeck);
           } else {
             toast.error(`Could not play “${otherSnap.track?.title ?? "next track"}”.`);
           }
@@ -513,6 +528,7 @@ export function DjConsole({
         if (first) {
           setQueue(rest);
           djEngine.setCrossfade(otherDeck === "A" ? 0 : 1, false);
+          djEngine.unloadTrack(endedDeck);
           void djEngine.loadTrack(otherDeck, first.track);
           void djEngine.play(otherDeck);
           flashDeck(otherDeck);
@@ -532,10 +548,11 @@ export function DjConsole({
         });
         if (picked) {
           djEngine.setCrossfade(otherDeck === "A" ? 0 : 1, false);
+          djEngine.unloadTrack(endedDeck);
           void djEngine.loadTrack(otherDeck, picked);
           void djEngine.play(otherDeck);
           flashDeck(otherDeck);
-          toast.info(`Auto-playing “${picked.title}”`);
+          toast.info(`Nothing queued — auto-playing “${picked.title}” from the library`);
         }
       }
     });
@@ -543,7 +560,23 @@ export function DjConsole({
     return () => {
       djEngine.setOnDeckEnded(null);
     };
-  }, [flashDeck, stageNextFromQueue]);
+  }, [flashDeck, retireDeck]);
+
+  // Manual mix finished: both decks running but the fader has rested fully on one side.
+  // After a short grace period (so a quick fader rock isn't punished) eject the silent deck.
+  const mutedDeck: DeckId | null =
+    isAutoFading || !deckA.isPlaying || !deckB.isPlaying
+      ? null
+      : isDeckFadedOut("A", crossfade)
+        ? "A"
+        : isDeckFadedOut("B", crossfade)
+          ? "B"
+          : null;
+  useEffect(() => {
+    if (!mutedDeck) return;
+    const timer = window.setTimeout(() => retireDeck(mutedDeck), MANUAL_MIX_EJECT_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [mutedDeck, retireDeck]);
 
   // Auto-stage first queued track into the idle deck if idle deck is empty
   useEffect(() => {
@@ -620,7 +653,7 @@ export function DjConsole({
           (oldDeck) => {
             autoFadeTriggeredForRef.current = null;
             autoPickTriggeredForRef.current = null;
-            stageNextFromQueue(oldDeck);
+            retireDeck(oldDeck);
           },
           mixMode,
         )
@@ -649,6 +682,7 @@ export function DjConsole({
     upcomingTransitionPlan,
     flashDeck,
     stageNextFromQueue,
+    retireDeck,
   ]);
 
   const applyLoadedTracks = useCallback((name: string, loaded: TrackItem[]) => {
@@ -874,7 +908,7 @@ export function DjConsole({
         (oldDeck) => {
           autoFadeTriggeredForRef.current = null;
           autoPickTriggeredForRef.current = null;
-          stageNextFromQueue(oldDeck);
+          retireDeck(oldDeck);
         },
         mixMode,
       )
@@ -883,7 +917,7 @@ export function DjConsole({
           toast.error(`Could not play “${targetTitle}”. The audio file may be unreadable.`);
         }
       });
-  }, [idleDeck, idleSnapshot.track, isAutoFading, fadeSeconds, mixMode, stageNextFromQueue]);
+  }, [idleDeck, idleSnapshot.track, isAutoFading, fadeSeconds, mixMode, retireDeck]);
 
   // Solo Shift tap triggers Fade to Next even while searching (still ignored if combined with another key)
   useEffect(() => {

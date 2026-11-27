@@ -473,6 +473,31 @@ export class DjAudioEngine {
     }
   }
 
+  /** Empty a deck so the DJ (or the queue) chooses what goes there next. */
+  unloadTrack(id: DeckId): void {
+    const d = this.decks[id];
+    d.loadSeq++;
+    if (d.softStopTimerId !== null) {
+      window.clearTimeout(d.softStopTimerId);
+      d.softStopTimerId = null;
+    }
+    this.cancelTempoGlide(id);
+    this.resetDeckDsp(id, 0.01);
+    d.audio.pause();
+    d.audio.playbackRate = 1;
+    d.audio.removeAttribute("src");
+    d.audio.load();
+    if (d.objectUrl) {
+      URL.revokeObjectURL(d.objectUrl);
+      d.objectUrl = null;
+    }
+    if (d.softStopGainNode && this.ctx) {
+      d.softStopGainNode.gain.setValueAtTime(1, this.ctx.currentTime);
+    }
+    d.snapshot = emptyDeck();
+    this.emit();
+  }
+
   async play(id: DeckId, resetDsp = true): Promise<boolean> {
     this.ensureAudioGraph();
     const d = this.decks[id];
