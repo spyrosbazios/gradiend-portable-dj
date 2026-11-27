@@ -1,13 +1,15 @@
 import {
   computeTransitionDsp,
   computeWaveformAndAutoGain,
-  detectAudibleBounds,
   equalPowerGains,
+  findCueSpot,
   planMixTransition,
+  TRACK_CUES_VERSION,
   type DeckId,
   type MixMode,
+  type TrackCues,
 } from "@/core/dj-math";
-import { bpmScheduler } from "@/lib/bpm-scheduler";
+import { analysisScheduler } from "@/lib/analysis-scheduler";
 
 export interface TrackItem {
   id: string;
@@ -20,6 +22,7 @@ export interface TrackItem {
   artist: string;
   duration: number | null;
   bpm: number | null;
+  cues: TrackCues | null;
   coverUrl: string | null;
   metadataLoaded: boolean;
 }
@@ -29,8 +32,8 @@ export interface DeckSnapshot {
   isPlaying: boolean;
   currentTime: number;
   duration: number;
-  cueInSec: number;
-  cueOutSec: number;
+  cues: TrackCues | null;
+  selectedEntryBar: number | null;
   peaks: number[];
   peaksLoading: boolean;
   autoGain: number;
@@ -65,8 +68,8 @@ function emptyDeck(): DeckSnapshot {
     isPlaying: false,
     currentTime: 0,
     duration: 0,
-    cueInSec: 0,
-    cueOutSec: 0,
+    cues: null,
+    selectedEntryBar: null,
     peaks: [],
     peaksLoading: false,
     autoGain: 1,
@@ -410,13 +413,16 @@ export class DjAudioEngine {
       d.autoGainNode.gain.setTargetAtTime(1, this.ctx.currentTime, 0.01);
     }
 
+    const initialCues =
+      track.cues && track.cues.version === TRACK_CUES_VERSION ? track.cues : null;
+
     d.snapshot = {
       track,
       isPlaying: false,
       currentTime: 0,
       duration: track.duration ?? 0,
-      cueInSec: 2.5,
-      cueOutSec: track.duration ?? 0,
+      cues: initialCues,
+      selectedEntryBar: initialCues ? initialCues.bestEntryBar : null,
       peaks: [],
       peaksLoading: true,
       autoGain: 1,
@@ -432,31 +438,41 @@ export class DjAudioEngine {
           ? await fetch(track.remoteUrl).then((r) => r.arrayBuffer())
           : null;
       if (!arrayBuf || d.loadSeq !== seq) return;
-      // 22.05 kHz mono halves decode RAM & CPU while preserving waveform, loudness, and BPM accuracy
+      // 22.05 kHz mono halves decode RAM & CPU while preserving waveform, loudness, and cue accuracy
       const offlineCtx = new OfflineAudioContext(1, 1, 22050);
       const audioBuf = await offlineCtx.decodeAudioData(arrayBuf);
       if (d.loadSeq !== seq) return;
 
       const channelData = audioBuf.getChannelData(0);
       const { peaks, autoGain } = computeWaveformAndAutoGain(channelData, 160);
-      const { cueInSec, cueOutSec } = detectAudibleBounds(
-        channelData,
-        audioBuf.sampleRate,
-        2.5,
-      );
-      const detectedBpm =
-        track.bpm ?? (await bpmScheduler.computeInWorker(channelData, audioBuf.sampleRate));
-      if (d.loadSeq !== seq) return;
 
-      if (track.bpm === null && detectedBpm !== null) {
-        bpmScheduler.recordResult(track, detectedBpm, audioBuf.duration);
+      let cues = initialCues;
+      let detectedBpm = track.bpm;
+      if (!cues) {
+        const cached = await analysisScheduler.getCachedAnalysis(track);
+        if (d.loadSeq !== seq) return;
+        if (cached) {
+          cues = cached.cues;
+          detectedBpm = detectedBpm ?? cached.bpm;
+        } else {
+          const analysis = await analysisScheduler.analyzeInWorker(
+            channelData,
+            audioBuf.sampleRate,
+          );
+          if (d.loadSeq !== seq) return;
+          cues = analysis.cues;
+          detectedBpm = detectedBpm ?? analysis.bpm;
+          analysisScheduler.recordResult(track, detectedBpm, cues, audioBuf.duration);
+        }
       }
+
+      const selectedEntryBar = d.snapshot.selectedEntryBar ?? cues.bestEntryBar;
 
       d.snapshot = {
         ...d.snapshot,
         duration: audioBuf.duration || d.snapshot.duration,
-        cueInSec,
-        cueOutSec,
+        cues,
+        selectedEntryBar,
         peaks,
         peaksLoading: false,
         autoGain,
@@ -536,7 +552,7 @@ export class DjAudioEngine {
       this.fadeRafId = null;
       this.isAutoFading = false;
       this.activeTransitionLabel = null;
-      bpmScheduler.setPausedForFade(false);
+      analysisScheduler.setPausedForFade(false);
       this.resetDeckDsp("A", 0.03);
       this.resetDeckDsp("B", 0.03);
       this.glideTempoToNatural("A", 800);
@@ -573,6 +589,24 @@ export class DjAudioEngine {
     this.emit();
   }
 
+  stepSelectedEntry(id: DeckId, delta: -1 | 1): void {
+    const d = this.decks[id];
+    const entries = d.snapshot.cues?.entries;
+    if (!entries || entries.length === 0) return;
+
+    const currentBar = d.snapshot.selectedEntryBar ?? d.snapshot.cues?.bestEntryBar ?? 0;
+    const currIdx = Math.max(
+      0,
+      entries.findIndex((s) => s.bar === currentBar),
+    );
+    const nextIdx = Math.min(entries.length - 1, Math.max(0, currIdx + delta));
+    const nextSpot = entries[nextIdx];
+    if (!nextSpot || nextSpot.bar === d.snapshot.selectedEntryBar) return;
+
+    d.snapshot = { ...d.snapshot, selectedEntryBar: nextSpot.bar };
+    this.emit();
+  }
+
   seek(id: DeckId, ratio: number): void {
     const d = this.decks[id];
     if (!d.snapshot.track) return;
@@ -601,7 +635,7 @@ export class DjAudioEngine {
       this.fadeRafId = null;
       this.isAutoFading = false;
       this.activeTransitionLabel = null;
-      bpmScheduler.setPausedForFade(false);
+      analysisScheduler.setPausedForFade(false);
       this.resetDeckDsp("A", 0.03);
       this.resetDeckDsp("B", 0.03);
       this.glideTempoToNatural("A", 1200);
@@ -674,19 +708,24 @@ export class DjAudioEngine {
       baseDurationMs: durationMs,
     });
 
-    // If the incoming deck hasn't been manually scrubbed and is sitting at 0:00,
-    // jump past the silent/slow intro (~2.5s+ or Beat-1 transient) before fading in
+    // Jump incoming deck to its chosen entry phrase cue before fading in
     const targetDur = targetInternals.snapshot.duration || targetInternals.audio.duration || 0;
+    const selectedEntry = targetInternals.snapshot.cues
+      ? findCueSpot(
+          targetInternals.snapshot.cues.entries,
+          targetInternals.snapshot.selectedEntryBar ?? targetInternals.snapshot.cues.bestEntryBar,
+        )
+      : null;
     if (
       targetInternals.audio.paused &&
-      targetInternals.audio.currentTime < 0.5 &&
-      targetInternals.snapshot.cueInSec > 0 &&
-      (targetDur === 0 || targetInternals.snapshot.cueInSec < targetDur - 5)
+      selectedEntry &&
+      selectedEntry.sec >= 0 &&
+      (targetDur === 0 || selectedEntry.sec < targetDur - 5)
     ) {
-      targetInternals.audio.currentTime = targetInternals.snapshot.cueInSec;
+      targetInternals.audio.currentTime = selectedEntry.sec;
       targetInternals.snapshot = {
         ...targetInternals.snapshot,
-        currentTime: targetInternals.snapshot.cueInSec,
+        currentTime: selectedEntry.sec,
       };
     }
 
@@ -701,7 +740,7 @@ export class DjAudioEngine {
       return false;
     }
 
-    bpmScheduler.setPausedForFade(true);
+    analysisScheduler.setPausedForFade(true);
 
     // Prepare initial DSP state immediately so beat 1 starts cleanly (no bass double-hit!)
     if (this.ctx) {
@@ -777,7 +816,7 @@ export class DjAudioEngine {
         this.fadeRafId = null;
         this.isAutoFading = false;
         this.activeTransitionLabel = null;
-        bpmScheduler.setPausedForFade(false);
+        analysisScheduler.setPausedForFade(false);
         this.crossfade = endVal;
         this.applyCrossfadeGains();
         this.resetDeckDsp(targetDeck, 0.02);

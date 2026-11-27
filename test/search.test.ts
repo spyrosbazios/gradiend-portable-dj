@@ -13,6 +13,7 @@ function makeTrack(id: string, title: string, artist: string): TrackItem {
     artist,
     duration: 200,
     bpm: 120,
+    cues: null,
     coverUrl: null,
     metadataLoaded: true,
   };

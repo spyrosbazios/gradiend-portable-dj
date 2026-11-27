@@ -22,6 +22,7 @@ import {
 import { toast } from "sonner";
 import {
   equalPowerGains,
+  getActiveExitSpot,
   getIdleDeck,
   getLiveDeck,
   isDeckFadedOut,
@@ -29,10 +30,11 @@ import {
   planMixTransition,
   type DeckId,
   type MixMode,
+  type TrackCues,
 } from "@/core/dj-math";
 import { THEMES, type ThemeName } from "@/core/theme";
 import { djEngine, type TrackItem } from "@/lib/audio-engine";
-import { bpmScheduler } from "@/lib/bpm-scheduler";
+import { analysisScheduler } from "@/lib/analysis-scheduler";
 import {
   filesToTrackItems,
   getSavedFolderName,
@@ -246,8 +248,11 @@ export function DjConsole({
   // Subscribe to Web Audio engine snapshots
   const engineVersion = useSyncExternalStore(
     (cb) => djEngine.subscribe(cb),
-    () =>
-      `${djEngine.getDeck("A").currentTime.toFixed(1)}:${djEngine.getDeck("A").isPlaying}:${djEngine.getDeck("A").track?.id ?? ""}:${djEngine.getDeck("A").peaks.length}:${djEngine.getDeck("A").bpm ?? ""}:${djEngine.getDeck("A").waveformLocked}|${djEngine.getDeck("B").currentTime.toFixed(1)}:${djEngine.getDeck("B").isPlaying}:${djEngine.getDeck("B").track?.id ?? ""}:${djEngine.getDeck("B").peaks.length}:${djEngine.getDeck("B").bpm ?? ""}:${djEngine.getDeck("B").waveformLocked}|${djEngine.getCrossfade().toFixed(3)}:${djEngine.getIsAutoFading()}:${djEngine.getActiveTransitionLabel() ?? ""}:${djEngine.getMasterVolume().toFixed(2)}`,
+    () => {
+      const a = djEngine.getDeck("A");
+      const b = djEngine.getDeck("B");
+      return `${a.currentTime.toFixed(1)}:${a.isPlaying}:${a.track?.id ?? ""}:${a.peaks.length}:${a.bpm ?? ""}:${a.cues?.bestExitBar ?? ""}:${a.selectedEntryBar ?? ""}:${a.waveformLocked}|${b.currentTime.toFixed(1)}:${b.isPlaying}:${b.track?.id ?? ""}:${b.peaks.length}:${b.bpm ?? ""}:${b.cues?.bestExitBar ?? ""}:${b.selectedEntryBar ?? ""}:${b.waveformLocked}|${djEngine.getCrossfade().toFixed(3)}:${djEngine.getIsAutoFading()}:${djEngine.getActiveTransitionLabel() ?? ""}:${djEngine.getMasterVolume().toFixed(2)}`;
+    },
   );
   void engineVersion;
 
@@ -352,9 +357,9 @@ export function DjConsole({
     void getSavedFolderName().then(setSavedFolderName);
   }, []);
 
-  // Wire Web Worker background BPM scheduler results into tracks + queue (batched to avoid 400 re-sorts)
+  // Wire Web Worker background analysis scheduler results into tracks + queue (batched to avoid 400 re-sorts)
   useEffect(() => {
-    const pending = new Map<string, number>();
+    const pending = new Map<string, { bpm: number | null; cues: TrackCues }>();
     let flushTimer: number | null = null;
 
     const flush = () => {
@@ -366,10 +371,12 @@ export function DjConsole({
       setTracks((prev) => {
         let changed = false;
         const next = prev.map((item) => {
-          const bpm = batch.get(item.id);
-          if (bpm === undefined || item.bpm === bpm) return item;
+          const res = batch.get(item.id);
+          if (!res) return item;
+          const nextBpm = res.bpm ?? item.bpm;
+          if (item.bpm === nextBpm && item.cues === res.cues) return item;
           changed = true;
-          return { ...item, bpm };
+          return { ...item, bpm: nextBpm, cues: res.cues };
         });
         return changed ? next : prev;
       });
@@ -378,24 +385,26 @@ export function DjConsole({
         if (prev.length === 0) return prev;
         let changed = false;
         const next = prev.map((entry) => {
-          const bpm = batch.get(entry.track.id);
-          if (bpm === undefined || entry.track.bpm === bpm) return entry;
+          const res = batch.get(entry.track.id);
+          if (!res) return entry;
+          const nextBpm = res.bpm ?? entry.track.bpm;
+          if (entry.track.bpm === nextBpm && entry.track.cues === res.cues) return entry;
           changed = true;
-          return { ...entry, track: { ...entry.track, bpm } };
+          return { ...entry, track: { ...entry.track, bpm: nextBpm, cues: res.cues } };
         });
         return changed ? next : prev;
       });
     };
 
-    bpmScheduler.setListener((trackId, bpm) => {
-      pending.set(trackId, bpm);
+    analysisScheduler.setListener((trackId, bpm, cues) => {
+      pending.set(trackId, { bpm, cues });
       if (flushTimer === null) {
         flushTimer = window.setTimeout(flush, 250);
       }
     });
 
     return () => {
-      bpmScheduler.setListener(null);
+      analysisScheduler.setListener(null);
       if (flushTimer !== null) {
         window.clearTimeout(flushTimer);
       }
@@ -591,10 +600,10 @@ export function DjConsole({
   useEffect(() => {
     if (!autoPlayEnabled || isAutoFading || !liveDeck || !liveSnapshot?.track) return;
 
-    const effectiveEnd =
-      liveSnapshot.cueOutSec > 0
-        ? Math.min(liveSnapshot.duration, liveSnapshot.cueOutSec)
-        : liveSnapshot.duration;
+    const activeExit = getActiveExitSpot(liveSnapshot.cues, liveSnapshot.currentTime);
+    const effectiveEnd = activeExit
+      ? Math.min(liveSnapshot.duration, activeExit.sec)
+      : liveSnapshot.duration;
     const plannedFadeSec = upcomingTransitionPlan
       ? upcomingTransitionPlan.durationMs / 1000
       : fadeSeconds;
@@ -691,7 +700,7 @@ export function DjConsole({
     metaQueueRef.current = [];
     autoFadeTriggeredForRef.current = null;
     autoPickTriggeredForRef.current = null;
-    bpmScheduler.reset();
+    analysisScheduler.reset();
 
     if (loaded.length === 0) {
       toast.error("No supported audio files found in that folder.");
@@ -700,12 +709,12 @@ export function DjConsole({
 
     toast.success(`Loaded ${loaded.length} songs from ${name}`);
 
-    // Batch-restore all cached titles, covers, and BPMs in one IndexedDB read,
-    // then trickle-calculate remaining BPMs in a Web Worker in the background
+    // Batch-restore all cached titles, covers, BPMs, and transition cues in one IndexedDB read,
+    // then trickle-analyze remaining tracks in a Web Worker in the background
     void hydrateCachedLibrary(loaded).then((hydrated) => {
       if (folderLoadSeqRef.current !== seq) return;
       setTracks(hydrated);
-      bpmScheduler.enqueueMany(hydrated, "low");
+      analysisScheduler.enqueueMany(hydrated, "low");
     });
   }, []);
 
@@ -819,19 +828,19 @@ export function DjConsole({
     [deckA.track, deckB.track, flashDeck, idleDeck, isAutoFading, liveDeck, playedIds],
   );
 
-  const ensureTrackBpm = useCallback((track: TrackItem) => {
-    bpmScheduler.enqueue(track, "queued");
+  const ensureTrackAnalysis = useCallback((track: TrackItem) => {
+    analysisScheduler.enqueue(track, "queued");
   }, []);
 
   const handlePrioritizeBpm = useCallback(
     (selected: TrackItem, neighbors: TrackItem[]) => {
-      bpmScheduler.setFocusWindow(selected, neighbors);
+      analysisScheduler.setFocusWindow(selected, neighbors);
     },
     [],
   );
 
   const handleScrollActivity = useCallback(() => {
-    bpmScheduler.notifyScrollActivity(220);
+    analysisScheduler.notifyScrollActivity(220);
   }, []);
 
   const handleAddToQueue = useCallback(
@@ -876,13 +885,13 @@ export function DjConsole({
       }
       const uid = `q-${++queueSeqRef.current}-${track.id}`;
       setQueue((prev) => [...prev, { uid, track }]);
-      ensureTrackBpm(track);
+      ensureTrackAnalysis(track);
       toast.success(`Added “${track.title}” to queue`);
     },
     [
       deckA.track,
       deckB.track,
-      ensureTrackBpm,
+      ensureTrackAnalysis,
       flashDeck,
       idleDeck,
       idleSnapshot.track,

@@ -4,7 +4,6 @@ import {
   computeBandEnvelopes,
   computeTransitionDsp,
   computeWaveformAndAutoGain,
-  detectAudibleBounds,
   detectBeatGrid,
   equalPowerGains,
   estimateBpm,
@@ -136,28 +135,6 @@ describe("BPM detection & transition fit", () => {
   });
 });
 
-describe("detectAudibleBounds", () => {
-  test("skips silent intro and trims quiet outro tail", () => {
-    const sr = 1000;
-    const pcm = new Float32Array(sr * 40); // 40s track
-    // 4s silent intro, audible from 4s to 34s, 6s silent outro
-    for (let i = sr * 4; i < sr * 34; i++) {
-      pcm[i] = Math.sin(i * 0.1) * 0.5;
-    }
-    const { cueInSec, cueOutSec } = detectAudibleBounds(pcm, sr, 2.5);
-    expect(cueInSec).toBeCloseTo(4, 1);
-    expect(cueOutSec).toBeCloseTo(34, 1);
-  });
-
-  test("applies minimum intro skip on immediate-start full tracks", () => {
-    const sr = 1000;
-    const pcm = new Float32Array(sr * 60).fill(0.4);
-    const { cueInSec, cueOutSec } = detectAudibleBounds(pcm, sr, 2.5);
-    expect(cueInSec).toBeCloseTo(2.5, 1);
-    expect(cueOutSec).toBeCloseTo(60, 1);
-  });
-});
-
 describe("pickAutoNextTrack", () => {
   test("prefers unplayed cached tracks with close BPM", () => {
     const tracks = [
@@ -256,17 +233,6 @@ describe("Smart Mix planner & DSP curves", () => {
     expect(tail.outgoing.echoSend).toBeCloseTo(0, 4);
     expect(tail.incoming.gain).toBeCloseTo(1, 3);
     expect(tail.incoming.bassDb).toBe(0);
-  });
-
-  test("detectAudibleBounds snaps Beat-1 cue forward past quiet intro pads", () => {
-    const sr = 1000;
-    const pcm = new Float32Array(sr * 60);
-    // 0..5s quiet pad (0.06), then loud beat hits at 5.0s (0.6)
-    for (let i = 0; i < sr * 5; i++) pcm[i] = 0.06;
-    for (let i = sr * 5; i < sr * 55; i++) pcm[i] = 0.6;
-    const { cueInSec } = detectAudibleBounds(pcm, sr, 2.5);
-    expect(cueInSec).toBeGreaterThanOrEqual(4.9);
-    expect(cueInSec).toBeLessThanOrEqual(5.1);
   });
 });
 

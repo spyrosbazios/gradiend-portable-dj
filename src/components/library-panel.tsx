@@ -160,12 +160,12 @@ export const LibraryPanel = memo(function LibraryPanel({
       const neighbors: TrackItem[] = [];
       for (let dist = 1; dist <= 5; dist++) {
         const after = list[clampedIndex + dist];
-        if (after && after.bpm === null) neighbors.push(after);
+        if (after && (after.bpm === null || after.cues === null)) neighbors.push(after);
         const before = list[clampedIndex - dist];
-        if (before && before.bpm === null) neighbors.push(before);
+        if (before && (before.bpm === null || before.cues === null)) neighbors.push(before);
       }
 
-      if (selected.bpm === null || neighbors.length > 0) {
+      if (selected.bpm === null || selected.cues === null || neighbors.length > 0) {
         onPrioritizeBpm(selected, neighbors);
       }
     }, 140);
