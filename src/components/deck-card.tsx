@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { formatTime, type CueSpot, type DeckId } from "@/core/dj-math";
 import type { DeckSnapshot } from "@/lib/audio-engine";
+import { keyName, type KeyFit } from "@/core/key-detect";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -22,6 +23,8 @@ interface DeckCardProps {
   deckId: DeckId;
   deck: DeckSnapshot;
   isLive: boolean;
+  /** Harmonic fit with the live deck; only set on the UP NEXT deck. */
+  keyFit: KeyFit | null;
   audibility: number;
   isEndingSoon: boolean;
   playBlockedByFader: boolean;
@@ -52,6 +55,7 @@ export const DeckCard = memo(function DeckCard({
   deckId,
   deck,
   isLive,
+  keyFit,
   audibility,
   isEndingSoon,
   playBlockedByFader,
@@ -252,6 +256,25 @@ export const DeckCard = memo(function DeckCard({
               {deck.bpm !== null && (
                 <span className="shrink-0 rounded bg-raised px-1.5 py-0.5 font-mono text-[10px] font-semibold text-fg tabular-nums">
                   {deck.bpm} BPM
+                </span>
+              )}
+              {deck.cues?.key && (
+                <span
+                  title={
+                    keyFit === "clash"
+                      ? `${keyName(deck.cues.key)}: key clashes with the live track, short blend`
+                      : keyFit === "match"
+                        ? `${keyName(deck.cues.key)}: key fits the live track`
+                        : keyName(deck.cues.key)
+                  }
+                  className={cn(
+                    "shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold tabular-nums",
+                    keyFit === "match" && "bg-up-soft text-up",
+                    keyFit === "clash" && "bg-warn-soft text-warn",
+                    (keyFit === null || keyFit === "unknown") && "bg-raised text-fg",
+                  )}
+                >
+                  {deck.cues.key.camelot}
                 </span>
               )}
             </div>
