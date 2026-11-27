@@ -1137,7 +1137,7 @@ export function estimateBpm(channelData: Float32Array, sampleRate: number): numb
 }
 
 /**
- * Evaluates how smoothly `nextBpm` follows `prevBpm`, accounting for half/double time.
+ * Evaluates how smoothly `nextBpm` follows `prevBpm`. Half/double-time fits grade "ok" at best.
  */
 export function evaluateBpmFit(prevBpm: number | null, nextBpm: number | null): BpmFit {
   if (!prevBpm || !nextBpm || prevBpm <= 0 || nextBpm <= 0) {
@@ -1145,19 +1145,36 @@ export function evaluateBpmFit(prevBpm: number | null, nextBpm: number | null): 
   }
 
   // Compare direct, half-time, and double-time ratios
-  const candidates = [nextBpm, nextBpm * 2, nextBpm * 0.5];
+  const candidates = [
+    { bpm: nextBpm, ratio: 1 },
+    { bpm: nextBpm * 2, ratio: 2 },
+    { bpm: nextBpm * 0.5, ratio: 0.5 },
+  ];
   let bestPct = Number.POSITIVE_INFINITY;
   let signedDiff = Math.round(nextBpm - prevBpm);
+  let ratio = 1;
 
   for (const cand of candidates) {
-    const pct = Math.abs(cand - prevBpm) / prevBpm;
+    const pct = Math.abs(cand.bpm - prevBpm) / prevBpm;
     if (pct < bestPct) {
       bestPct = pct;
-      signedDiff = Math.round(cand - prevBpm);
+      signedDiff = Math.round(cand.bpm - prevBpm);
+      ratio = cand.ratio;
     }
   }
 
   const sign = signedDiff > 0 ? "+" : "";
+  if (bestPct > 0.14) {
+    return { status: "clash", diffBpm: signedDiff, label: `Big jump (${sign}${signedDiff})` };
+  }
+  // A half/double-time fit can be beat-synced, but it changes the feel: never grade it green.
+  if (ratio !== 1) {
+    return {
+      status: "ok",
+      diffBpm: signedDiff,
+      label: ratio === 2 ? `Half-time (${sign}${signedDiff})` : `Double-time (${sign}${signedDiff})`,
+    };
+  }
   if (bestPct <= 0.06) {
     return {
       status: "good",
@@ -1165,18 +1182,7 @@ export function evaluateBpmFit(prevBpm: number | null, nextBpm: number | null): 
       label: signedDiff === 0 ? "Exact match" : `Smooth (${sign}${signedDiff})`,
     };
   }
-  if (bestPct <= 0.14) {
-    return {
-      status: "ok",
-      diffBpm: signedDiff,
-      label: `Shift (${sign}${signedDiff})`,
-    };
-  }
-  return {
-    status: "clash",
-    diffBpm: signedDiff,
-    label: `Big jump (${sign}${signedDiff})`,
-  };
+  return { status: "ok", diffBpm: signedDiff, label: `Shift (${sign}${signedDiff})` };
 }
 
 export interface BpmTrackCandidate {

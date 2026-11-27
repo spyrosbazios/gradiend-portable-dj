@@ -134,7 +134,8 @@ describe("BPM detection & transition fit", () => {
     expect(evaluateBpmFit(120, 124).status).toBe("good");
     expect(evaluateBpmFit(120, 132).status).toBe("ok");
     expect(evaluateBpmFit(95, 140).status).toBe("clash");
-    expect(evaluateBpmFit(150, 75).status).toBe("good"); // half-time matches!
+    expect(evaluateBpmFit(150, 75).status).toBe("ok"); // half-time syncs but is never green
+    expect(evaluateBpmFit(100, 50).label).toBe("Half-time (0)");
     expect(evaluateBpmFit(120, null).status).toBe("unknown");
   });
 });
