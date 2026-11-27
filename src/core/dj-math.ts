@@ -221,26 +221,604 @@ export interface BpmFit {
   label: string;
 }
 
+export interface BeatGrid {
+  bpm: number;
+  /** Timestamp (seconds) of bar 0, beat 1; bar n = firstDownbeatSec + n * 4 * 60 / bpm. */
+  firstDownbeatSec: number;
+}
+
+export type SpotQuality = "good" | "ok" | "risky";
+
+export interface CueSpot {
+  bar: number;
+  sec: number;
+  quality: SpotQuality;
+  reason: string;
+}
+
+export const TRACK_CUES_VERSION = 1 as const;
+
+export interface TrackCues {
+  version: 1;
+  grid: BeatGrid | null;
+  entries: CueSpot[];
+  exits: CueSpot[];
+  bestEntryBar: number;
+  bestExitBar: number;
+  confidence: "high" | "low";
+}
+
+export interface AudioEnvelopes {
+  envRate: number;
+  durationSec: number;
+  total: Float32Array;
+  low: Float32Array;
+  mid: Float32Array;
+}
+
+export interface BeatGridResult {
+  bpm: number | null;
+  grid: BeatGrid | null;
+  confidence: "high" | "low";
+  fitStrength: number;
+}
+
 /**
- * Estimates tempo (BPM) from a mono PCM Float32Array using a downsampled
- * energy-onset envelope + autocorrelation over the 70–175 BPM range.
+ * Computes ~100 Hz RMS envelopes for total energy, low band (< 150 Hz one-pole LPF),
+ * and mid band (300 Hz–3 kHz vocal proxy) over the entire mono PCM buffer.
+ */
+export function computeBandEnvelopes(
+  channelData: Float32Array,
+  sampleRate: number,
+): AudioEnvelopes {
+  if (sampleRate <= 0 || channelData.length === 0) {
+    return {
+      envRate: 100,
+      durationSec: 0,
+      total: new Float32Array(0),
+      low: new Float32Array(0),
+      mid: new Float32Array(0),
+    };
+  }
+
+  const hop = Math.max(1, Math.round(sampleRate / 100));
+  const envRate = sampleRate / hop;
+  const envLen = Math.floor(channelData.length / hop);
+  const durationSec = channelData.length / sampleRate;
+
+  const total = new Float32Array(envLen);
+  const low = new Float32Array(envLen);
+  const mid = new Float32Array(envLen);
+
+  const totalAcc = new Float32Array(envLen);
+  const lowAcc = new Float32Array(envLen);
+  const midAcc = new Float32Array(envLen);
+
+  // Precompute half-Hann weights so each sample contributes to adjacent frames,
+  // forming a 20 ms Hann-weighted RMS centered at frame / envRate with minimal tone ripple.
+  const wCurr = new Float32Array(hop);
+  for (let j = 0; j < hop; j++) {
+    wCurr[j] = 0.5 * (1 + Math.cos((Math.PI * j) / hop));
+  }
+
+  // One-pole low-pass (< 150 Hz) for kick/bass energy
+  const lowCutoff = Math.min(150, sampleRate * 0.45);
+  const alphaLow = 1 - Math.exp((-2 * Math.PI * lowCutoff) / sampleRate);
+
+  // Cascaded one-pole HPF (300 Hz) + one-pole LPF (3 kHz) for vocal proxy
+  const midHpCutoff = Math.min(300, sampleRate * 0.4);
+  const midLpCutoff = Math.min(3000, sampleRate * 0.45);
+  const aMidHp = 1 / (1 + (2 * Math.PI * midHpCutoff) / sampleRate);
+  const alphaMidLp = 1 - Math.exp((-2 * Math.PI * midLpCutoff) / sampleRate);
+
+  let lowY = 0;
+  let hp1 = 0;
+  let prevX = 0;
+  let hp2 = 0;
+  let prevHp1 = 0;
+  let midY = 0;
+
+  for (let frame = 0; frame < envLen; frame++) {
+    const base = frame * hop;
+    const hasNext = frame + 1 < envLen;
+    let sumCurrTotal = 0;
+    let sumCurrLow = 0;
+    let sumCurrMid = 0;
+    let sumNextTotal = 0;
+    let sumNextLow = 0;
+    let sumNextMid = 0;
+
+    for (let j = 0; j < hop; j++) {
+      const x = channelData[base + j] ?? 0;
+
+      lowY += alphaLow * (x - lowY);
+
+      const nextHp1 = aMidHp * (hp1 + x - prevX);
+      prevX = x;
+      hp1 = nextHp1;
+
+      const nextHp2 = aMidHp * (hp2 + hp1 - prevHp1);
+      prevHp1 = hp1;
+      hp2 = nextHp2;
+
+      midY += alphaMidLp * (hp2 - midY);
+
+      const x2 = x * x;
+      const l2 = lowY * lowY;
+      const m2 = midY * midY;
+      const w = wCurr[j] ?? 0.5;
+      const wNext = 1 - w;
+
+      sumCurrTotal += x2 * w;
+      sumCurrLow += l2 * w;
+      sumCurrMid += m2 * w;
+      if (hasNext) {
+        sumNextTotal += x2 * wNext;
+        sumNextLow += l2 * wNext;
+        sumNextMid += m2 * wNext;
+      }
+    }
+
+    totalAcc[frame] = (totalAcc[frame] ?? 0) + sumCurrTotal;
+    lowAcc[frame] = (lowAcc[frame] ?? 0) + sumCurrLow;
+    midAcc[frame] = (midAcc[frame] ?? 0) + sumCurrMid;
+    if (hasNext) {
+      totalAcc[frame + 1] = (totalAcc[frame + 1] ?? 0) + sumNextTotal;
+      lowAcc[frame + 1] = (lowAcc[frame + 1] ?? 0) + sumNextLow;
+      midAcc[frame + 1] = (midAcc[frame + 1] ?? 0) + sumNextMid;
+    }
+  }
+
+  for (let frame = 0; frame < envLen; frame++) {
+    // Frame 0 only receives the right half-window (total weight = 0.5 * hop)
+    const norm = frame === 0 ? 0.5 * hop : hop;
+    total[frame] = Math.sqrt((totalAcc[frame] ?? 0) / norm);
+    low[frame] = Math.sqrt((lowAcc[frame] ?? 0) / norm);
+    mid[frame] = Math.sqrt((midAcc[frame] ?? 0) / norm);
+  }
+
+  return { envRate, durationSec, total, low, mid };
+}
+
+export function findAudibleRange(
+  totalEnv: Float32Array,
+  envRate: number,
+  durationSec: number,
+): { startSec: number; endSec: number } {
+  if (totalEnv.length === 0 || envRate <= 0 || durationSec <= 0) {
+    return { startSec: 0, endSec: Math.max(0, durationSec) };
+  }
+
+  let maxRms = 0;
+  for (let i = 0; i < totalEnv.length; i++) {
+    const v = totalEnv[i] ?? 0;
+    if (v > maxRms) maxRms = v;
+  }
+  if (maxRms < 1e-4) {
+    return { startSec: 0, endSec: durationSec };
+  }
+
+  const threshold = Math.max(0.012, Math.min(0.035, maxRms * 0.08));
+  let firstFrame = 0;
+  for (let i = 0; i < totalEnv.length; i++) {
+    if ((totalEnv[i] ?? 0) >= threshold) {
+      firstFrame = i;
+      break;
+    }
+  }
+
+  let lastFrame = totalEnv.length - 1;
+  for (let i = totalEnv.length - 1; i >= firstFrame; i--) {
+    if ((totalEnv[i] ?? 0) >= threshold) {
+      lastFrame = i;
+      break;
+    }
+  }
+
+  return {
+    startSec: firstFrame / envRate,
+    endSec: Math.min(durationSec, (lastFrame + 1) / envRate),
+  };
+}
+
+function buildOnsetEnvelope(env: Float32Array): { onset: Float32Array; mean: number } {
+  const n = env.length;
+  const onset = new Float32Array(n);
+  if (n < 2) return { onset, mean: 0 };
+
+  let sum = 0;
+  let rmsSum = env[0] ?? 0;
+  for (let i = 1; i < n; i++) {
+    const curr = env[i] ?? 0;
+    rmsSum += curr;
+    const diff = curr - (env[i - 1] ?? 0);
+    const val = diff > 0 ? diff : 0;
+    onset[i] = val;
+    sum += val;
+  }
+
+  const mean = sum / n;
+  const meanRms = rmsSum / n;
+  // Reject flat/sustained drones where frame-to-frame ripple is negligible relative to loudness
+  if (mean < 1e-4 || mean < meanRms * 0.015) {
+    onset.fill(0);
+    return { onset, mean: 0 };
+  }
+
+  const floor = mean * 0.5;
+  for (let i = 0; i < n; i++) {
+    const v = (onset[i] ?? 0) - floor;
+    onset[i] = v > 0 ? v : 0;
+  }
+  return { onset, mean };
+}
+
+function sampleLinear(arr: Float32Array, pos: number): number {
+  const n = arr.length;
+  if (pos < 0 || pos >= n - 1) {
+    const idx = Math.round(pos);
+    return idx >= 0 && idx < n ? (arr[idx] ?? 0) : 0;
+  }
+  const lo = Math.floor(pos);
+  const frac = pos - lo;
+  return (arr[lo] ?? 0) * (1 - frac) + (arr[lo + 1] ?? 0) * frac;
+}
+
+function fractionalAutocorr(onset: Float32Array, lag: number): number {
+  const n = onset.length;
+  const lo = Math.floor(lag);
+  const frac = lag - lo;
+  const limit = n - lo - 1;
+  if (limit <= 0) return 0;
+
+  let sum = 0;
+  const invFrac = 1 - frac;
+  for (let i = 0; i < limit; i++) {
+    const a = onset[i] ?? 0;
+    if (a === 0) continue;
+    const b = (onset[i + lo] ?? 0) * invFrac + (onset[i + lo + 1] ?? 0) * frac;
+    sum += a * b;
+  }
+  return sum / limit;
+}
+
+function estimateBpmFromOnset(
+  onset: Float32Array,
+  envRate: number,
+): { bpm: number; peakRatio: number } | null {
+  const envLen = onset.length;
+  if (envLen < Math.floor(envRate * 3)) return null;
+
+  const minBpm = 70;
+  const maxBpm = 175;
+  const minLag = Math.max(1, Math.floor((60 * envRate) / maxBpm));
+  const maxLag = Math.min(envLen - 2, Math.ceil((60 * envRate) / minBpm));
+  if (maxLag <= minLag) return null;
+
+  const rawScores = new Float32Array(maxLag + 2);
+  let bestLag = 0;
+  let bestWeighted = -1;
+  let sumRaw = 0;
+  let lagCount = 0;
+
+  // Include one-frame margin on both sides for parabolic interpolation
+  const scanStart = Math.max(1, minLag - 1);
+  const scanEnd = Math.min(envLen - 2, maxLag + 1);
+  for (let lag = scanStart; lag <= scanEnd; lag++) {
+    let score = 0;
+    const limit = envLen - lag;
+    for (let i = 0; i < limit; i++) {
+      score += (onset[i] ?? 0) * (onset[i + lag] ?? 0);
+    }
+    const raw = score / limit;
+    rawScores[lag] = raw;
+
+    if (lag >= minLag && lag <= maxLag) {
+      sumRaw += raw;
+      lagCount++;
+      const bpm = (60 * envRate) / lag;
+      const prior = bpm >= 90 && bpm <= 150 ? 1.06 : 1.0;
+      const weighted = raw * prior;
+      if (weighted > bestWeighted) {
+        bestWeighted = weighted;
+        bestLag = lag;
+      }
+    }
+  }
+
+  if (bestLag <= 0 || bestWeighted <= 0 || lagCount === 0) return null;
+
+  const bestRaw = rawScores[bestLag] ?? 0;
+  const meanRaw = sumRaw / lagCount;
+  const peakRatio = meanRaw > 1e-12 ? bestRaw / meanRaw : 0;
+
+  // Parabolic interpolation around bestLag for initial fractional BPM
+  const prev = rawScores[bestLag - 1] ?? bestRaw;
+  const next = rawScores[bestLag + 1] ?? bestRaw;
+  const denom = prev - 2 * bestRaw + next;
+  let refinedLag = bestLag;
+  if (Math.abs(denom) > 1e-12) {
+    const delta = Math.max(-0.5, Math.min(0.5, (0.5 * (prev - next)) / denom));
+    refinedLag = bestLag + delta;
+  }
+
+  const coarseBpm = (60 * envRate) / refinedLag;
+
+  // Two-stage fine BPM refinement using 1-, 2-, 4-, and 8-beat harmonic lags
+  const scoreBpmCandidate = (candBpm: number): number => {
+    const beatLag = (60 * envRate) / candBpm;
+    let totalScore = fractionalAutocorr(onset, beatLag);
+    if (beatLag * 2 < envLen - 2) {
+      totalScore += fractionalAutocorr(onset, beatLag * 2);
+    }
+    if (beatLag * 4 < envLen - 2) {
+      totalScore += 1.5 * fractionalAutocorr(onset, beatLag * 4);
+    }
+    if (beatLag * 8 < envLen - 2) {
+      totalScore += 1.5 * fractionalAutocorr(onset, beatLag * 8);
+    }
+    return totalScore;
+  };
+
+  let bestFineBpm = coarseBpm;
+  let bestFineScore = -1;
+  const coarseLo = Math.max(minBpm, coarseBpm - 2.5);
+  const coarseHi = Math.min(maxBpm, coarseBpm + 2.5);
+  for (let b = coarseLo; b <= coarseHi + 1e-6; b += 0.25) {
+    const s = scoreBpmCandidate(b);
+    if (s > bestFineScore) {
+      bestFineScore = s;
+      bestFineBpm = b;
+    }
+  }
+
+  let finalBpm = bestFineBpm;
+  let finalScore = bestFineScore;
+  const fineLo = Math.max(minBpm, bestFineBpm - 0.35);
+  const fineHi = Math.min(maxBpm, bestFineBpm + 0.35);
+  for (let b = fineLo; b <= fineHi + 1e-6; b += 0.05) {
+    const s = scoreBpmCandidate(b);
+    if (s > finalScore) {
+      finalScore = s;
+      finalBpm = b;
+    }
+  }
+
+  return {
+    bpm: Math.round(finalBpm * 10) / 10,
+    peakRatio,
+  };
+}
+
+/**
+ * Detects tempo (BPM), downbeat phase (bar 0, beat 1), and fit confidence from
+ * precomputed multi-band ~100 Hz envelopes.
+ */
+export function detectBeatGridFromEnvelopes(envelopes: AudioEnvelopes): BeatGridResult {
+  const { envRate, durationSec, total, low } = envelopes;
+  if (total.length < Math.floor(envRate * 4) || durationSec < 4) {
+    return { bpm: null, grid: null, confidence: "low", fitStrength: 0 };
+  }
+
+  const totalOnsetRes = buildOnsetEnvelope(total);
+  if (totalOnsetRes.mean <= 0) {
+    return { bpm: null, grid: null, confidence: "low", fitStrength: 0 };
+  }
+
+  const bpmRes = estimateBpmFromOnset(totalOnsetRes.onset, envRate);
+  if (!bpmRes) {
+    return { bpm: null, grid: null, confidence: "low", fitStrength: 0 };
+  }
+
+  const { bpm, peakRatio } = bpmRes;
+  if (peakRatio < 1.35) {
+    return { bpm: null, grid: null, confidence: "low", fitStrength: peakRatio };
+  }
+
+  const lowOnsetRes = buildOnsetEnvelope(low);
+
+  // Measure whether low band carries meaningful energy (distinguishes kicks from high-only clicks)
+  let sumTotalRms = 0;
+  let sumLowRms = 0;
+  for (let i = 0; i < total.length; i++) {
+    sumTotalRms += total[i] ?? 0;
+    sumLowRms += low[i] ?? 0;
+  }
+  const hasLowEnergy = sumTotalRms > 0 && sumLowRms > sumTotalRms * 0.06 && lowOnsetRes.mean > 0;
+
+  const envLen = total.length;
+  const normTotal = new Float32Array(envLen);
+  const normLow = new Float32Array(envLen);
+  const beatSignal = new Float32Array(envLen);
+  const downbeatSignal = new Float32Array(envLen);
+
+  const totalScale = totalOnsetRes.mean > 0 ? 1 / totalOnsetRes.mean : 0;
+  const lowScale = hasLowEnergy && lowOnsetRes.mean > 0 ? 1 / lowOnsetRes.mean : 0;
+
+  for (let i = 0; i < envLen; i++) {
+    const nt = (totalOnsetRes.onset[i] ?? 0) * totalScale;
+    const nl = (lowOnsetRes.onset[i] ?? 0) * lowScale;
+    normTotal[i] = nt;
+    normLow[i] = nl;
+    beatSignal[i] = hasLowEnergy ? 0.65 * nl + 0.35 * nt : nt;
+    downbeatSignal[i] = hasLowEnergy ? 0.85 * nl + 0.15 * nt : nt;
+  }
+
+  const audible = findAudibleRange(total, envRate, durationSec);
+  const beatSec = 60 / bpm;
+  const barSec = beatSec * 4;
+
+  // Fine phase search within one beat (~5 ms resolution)
+  const numShifts = Math.max(24, Math.round(beatSec * envRate * 2));
+  const shiftScores = new Float32Array(numShifts);
+  let bestShiftIdx = 0;
+  let bestShiftScore = -1;
+  let sumShiftScores = 0;
+
+  for (let s = 0; s < numShifts; s++) {
+    const phiSec = (s / numShifts) * beatSec;
+    const firstK = Math.max(0, Math.ceil((audible.startSec - phiSec) / beatSec));
+    let sum = 0;
+    let count = 0;
+    for (let k = firstK; ; k++) {
+      const t = phiSec + k * beatSec;
+      if (t >= audible.endSec) break;
+      sum += sampleLinear(beatSignal, t * envRate);
+      count++;
+    }
+    const avg = count > 0 ? sum / count : 0;
+    shiftScores[s] = avg;
+    sumShiftScores += avg;
+    if (avg > bestShiftScore) {
+      bestShiftScore = avg;
+      bestShiftIdx = s;
+    }
+  }
+
+  const meanShiftScore = sumShiftScores / numShifts;
+  const phaseConcentration = meanShiftScore > 1e-12 ? bestShiftScore / meanShiftScore : 0;
+  if (phaseConcentration < 1.25) {
+    return {
+      bpm: Math.round(bpm),
+      grid: null,
+      confidence: "low",
+      fitStrength: Math.min(peakRatio, phaseConcentration),
+    };
+  }
+
+  // Circular parabolic refinement around bestShiftIdx
+  const prevShift = shiftScores[(bestShiftIdx - 1 + numShifts) % numShifts] ?? bestShiftScore;
+  const nextShift = shiftScores[(bestShiftIdx + 1) % numShifts] ?? bestShiftScore;
+  const shiftDenom = prevShift - 2 * bestShiftScore + nextShift;
+  let refinedShift = bestShiftIdx;
+  if (Math.abs(shiftDenom) > 1e-12) {
+    const delta = Math.max(-0.5, Math.min(0.5, (0.5 * (prevShift - nextShift)) / shiftDenom));
+    refinedShift = (bestShiftIdx + delta + numShifts) % numShifts;
+  }
+  const bestBeatPhaseSec = (refinedShift / numShifts) * beatSec;
+
+  // Test the 4 beat offsets (0..3) to identify beat 1 (downbeat)
+  let bestBarOffset = 0;
+  let bestBarScore = -1;
+  const barOffsetScores = [0, 0, 0, 0];
+
+  const firstGlobalBeat = Math.max(
+    0,
+    Math.ceil((audible.startSec - bestBeatPhaseSec) / beatSec),
+  );
+  const totalBeats = Math.floor((audible.endSec - bestBeatPhaseSec) / beatSec) + 1;
+  const beatAccent = new Float32Array(Math.max(0, totalBeats));
+  const beatEnergy = new Float32Array(Math.max(0, totalBeats));
+
+  for (let k = firstGlobalBeat; k < totalBeats; k++) {
+    const t = bestBeatPhaseSec + k * beatSec;
+    const f = t * envRate;
+    // Take local peak within ±1 frame to tolerate slight one-pole filter attack lag
+    const c0 = sampleLinear(downbeatSignal, f);
+    const cPrev = sampleLinear(downbeatSignal, f - 0.75);
+    const cNext = sampleLinear(downbeatSignal, f + 0.75);
+    beatAccent[k] = Math.max(c0, 0.9 * cPrev, 0.9 * cNext);
+
+    const fStart = Math.max(0, Math.floor(f));
+    const fEnd = Math.min(envLen, Math.floor((t + beatSec) * envRate));
+    let eSum = 0;
+    let eCount = 0;
+    for (let j = fStart; j < fEnd; j++) {
+      eSum += total[j] ?? 0;
+      eCount++;
+    }
+    beatEnergy[k] = eCount > 0 ? eSum / eCount : 0;
+  }
+
+  for (let offset = 0; offset < 4; offset++) {
+    let accentSum = 0;
+    let accentCount = 0;
+    let noveltySum = 0;
+    let noveltyCount = 0;
+
+    for (let k = firstGlobalBeat; k < totalBeats; k++) {
+      if (k % 4 !== offset) continue;
+      accentSum += beatAccent[k] ?? 0;
+      accentCount++;
+
+      // Bar-boundary energy novelty (helps 4-on-the-floor tracks with identical kicks)
+      if (k >= firstGlobalBeat + 4 && k + 3 < totalBeats) {
+        const before =
+          ((beatEnergy[k - 4] ?? 0) +
+            (beatEnergy[k - 3] ?? 0) +
+            (beatEnergy[k - 2] ?? 0) +
+            (beatEnergy[k - 1] ?? 0)) *
+          0.25;
+        const after =
+          ((beatEnergy[k] ?? 0) +
+            (beatEnergy[k + 1] ?? 0) +
+            (beatEnergy[k + 2] ?? 0) +
+            (beatEnergy[k + 3] ?? 0)) *
+          0.25;
+        noveltySum += Math.abs(after - before);
+        noveltyCount++;
+      }
+    }
+
+    const avgAccent = accentCount > 0 ? accentSum / accentCount : 0;
+    const avgNovelty = noveltyCount > 0 ? noveltySum / noveltyCount : 0;
+    const score = avgAccent + 0.15 * avgNovelty;
+    barOffsetScores[offset] = score;
+    if (score > bestBarScore) {
+      bestBarScore = score;
+      bestBarOffset = offset;
+    }
+  }
+
+  let barPhaseSec = bestBeatPhaseSec + bestBarOffset * beatSec;
+  if (barSec - barPhaseSec < 0.03) {
+    barPhaseSec = 0;
+  }
+
+  // Anchor firstDownbeatSec at the first bar downbeat at or just around audible start
+  let firstDownbeatSec = barPhaseSec;
+  const minDownbeat = Math.max(0, audible.startSec - beatSec * 0.25);
+  if (firstDownbeatSec < minDownbeat) {
+    const barsToAdvance = Math.ceil((minDownbeat - firstDownbeatSec) / barSec);
+    firstDownbeatSec += barsToAdvance * barSec;
+  }
+  firstDownbeatSec = Math.round(Math.max(0, firstDownbeatSec) * 10000) / 10000;
+
+  const fitStrength = Math.min(peakRatio, phaseConcentration);
+  const confidence: "high" | "low" =
+    peakRatio >= 1.6 && phaseConcentration >= 1.45 ? "high" : "low";
+
+  return {
+    bpm: Math.round(bpm),
+    grid: { bpm, firstDownbeatSec },
+    confidence,
+    fitStrength,
+  };
+}
+
+/**
+ * Detects tempo (BPM) and bar-1 downbeat grid directly from mono PCM samples.
+ */
+export function detectBeatGrid(channelData: Float32Array, sampleRate: number): BeatGridResult {
+  const envelopes = computeBandEnvelopes(channelData, sampleRate);
+  return detectBeatGridFromEnvelopes(envelopes);
+}
+
+/**
+ * Estimates tempo (BPM) from a mono PCM Float32Array using a ~100 Hz energy-onset
+ * envelope + autocorrelation over the whole track across the 70–175 BPM range.
  */
 export function estimateBpm(channelData: Float32Array, sampleRate: number): number | null {
   if (channelData.length < sampleRate * 4 || sampleRate <= 0) return null;
 
-  // Analyze up to 28 seconds from the middle of the track (skipping quiet intros/outros)
-  const maxSamples = Math.min(channelData.length, Math.floor(sampleRate * 28));
-  const startOffset = Math.max(0, Math.floor((channelData.length - maxSamples) / 2));
-
-  // Build ~100 Hz energy envelope
-  const envRate = 100;
-  const hop = Math.max(1, Math.floor(sampleRate / envRate));
-  const envLen = Math.floor(maxSamples / hop);
+  const hop = Math.max(1, Math.round(sampleRate / 100));
+  const envRate = sampleRate / hop;
+  const envLen = Math.floor(channelData.length / hop);
   if (envLen < 300) return null;
 
   const env = new Float32Array(envLen);
   for (let i = 0; i < envLen; i++) {
-    const base = startOffset + i * hop;
+    const base = i * hop;
     const step = Math.max(1, Math.floor(hop / 32));
     let sum = 0;
     let count = 0;
@@ -252,50 +830,12 @@ export function estimateBpm(channelData: Float32Array, sampleRate: number): numb
     env[i] = count > 0 ? Math.sqrt(sum / count) : 0;
   }
 
-  // Half-wave rectified first-order difference (onset strength)
-  const onset = new Float32Array(envLen);
-  let meanOnset = 0;
-  for (let i = 1; i < envLen; i++) {
-    const diff = (env[i] ?? 0) - (env[i - 1] ?? 0);
-    const val = diff > 0 ? diff : 0;
-    onset[i] = val;
-    meanOnset += val;
-  }
-  meanOnset /= envLen;
-  if (meanOnset < 1e-4) return null;
+  const { onset, mean } = buildOnsetEnvelope(env);
+  if (mean <= 0) return null;
 
-  for (let i = 0; i < envLen; i++) {
-    onset[i] = Math.max(0, (onset[i] ?? 0) - meanOnset * 0.5);
-  }
-
-  // Autocorrelation across lags corresponding to 70–175 BPM
-  const minBpm = 70;
-  const maxBpm = 175;
-  const minLag = Math.floor((60 * envRate) / maxBpm);
-  const maxLag = Math.ceil((60 * envRate) / minBpm);
-
-  let bestLag = 0;
-  let bestScore = -1;
-
-  for (let lag = minLag; lag <= maxLag; lag++) {
-    let score = 0;
-    const limit = envLen - lag;
-    for (let i = 0; i < limit; i++) {
-      score += (onset[i] ?? 0) * (onset[i + lag] ?? 0);
-    }
-    // Slight preference for typical 95–145 BPM DJ range to avoid sub-harmonic ambiguity
-    const bpm = (60 * envRate) / lag;
-    const prior = bpm >= 90 && bpm <= 150 ? 1.06 : 1.0;
-    const weighted = (score / limit) * prior;
-    if (weighted > bestScore) {
-      bestScore = weighted;
-      bestLag = lag;
-    }
-  }
-
-  if (bestLag <= 0 || bestScore <= 0) return null;
-  const rawBpm = (60 * envRate) / bestLag;
-  return Math.round(rawBpm);
+  const res = estimateBpmFromOnset(onset, envRate);
+  if (!res || res.peakRatio < 1.2) return null;
+  return Math.round(res.bpm);
 }
 
 /**

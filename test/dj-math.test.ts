@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  computeBandEnvelopes,
   computeTransitionDsp,
   computeWaveformAndAutoGain,
   detectAudibleBounds,
+  detectBeatGrid,
   equalPowerGains,
   estimateBpm,
   evaluateBpmFit,
@@ -260,5 +262,134 @@ describe("Smart Mix planner & DSP curves", () => {
     const { cueInSec } = detectAudibleBounds(pcm, sr, 2.5);
     expect(cueInSec).toBeGreaterThanOrEqual(4.9);
     expect(cueInSec).toBeLessThanOrEqual(5.1);
+  });
+});
+
+/**
+ * Synthesizes a 4/4 click track at 22.05 kHz with a low-frequency kick (75 Hz)
+ * accented on beat 1 and lighter hits on beats 2–4, starting at `offsetSec`.
+ */
+function makeClickTrack(options: {
+  bpm: number;
+  durationSec: number;
+  offsetSec: number;
+  sampleRate?: number;
+  beat1Gain?: number;
+  otherBeatGain?: number;
+}): Float32Array {
+  const {
+    bpm,
+    durationSec,
+    offsetSec,
+    sampleRate = 22050,
+    beat1Gain = 0.95,
+    otherBeatGain = 0.45,
+  } = options;
+  const pcm = new Float32Array(Math.floor(sampleRate * durationSec));
+  const beatSec = 60 / bpm;
+  const kickLen = Math.floor(sampleRate * 0.08); // 80 ms kick envelope
+
+  for (let beat = 0; ; beat++) {
+    const t = offsetSec + beat * beatSec;
+    if (t >= durationSec - 0.1) break;
+    const startSample = Math.round(t * sampleRate);
+    const isDownbeat = beat % 4 === 0;
+    const gain = isDownbeat ? beat1Gain : otherBeatGain;
+    const freq = isDownbeat ? 72 : 110;
+
+    for (let k = 0; k < kickLen && startSample + k < pcm.length; k++) {
+      const env = Math.exp((-6 * k) / kickLen);
+      const click = isDownbeat ? Math.sin((2 * Math.PI * freq * k) / sampleRate) : Math.sin((2 * Math.PI * freq * k) / sampleRate) * 0.6 + Math.sin((2 * Math.PI * 1200 * k) / sampleRate) * 0.4;
+      pcm[startSample + k] = (pcm[startSample + k] ?? 0) + gain * env * click;
+    }
+  }
+  return pcm;
+}
+
+describe("Beat grid & downbeat detection", () => {
+  test("computes separate low (<150 Hz) and mid (300 Hz–3 kHz) band envelopes", () => {
+    const sr = 22050;
+    const n = sr * 4;
+    const lowTone = new Float32Array(n);
+    const midTone = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      lowTone[i] = 0.5 * Math.sin((2 * Math.PI * 75 * i) / sr);
+      midTone[i] = 0.5 * Math.sin((2 * Math.PI * 1000 * i) / sr);
+    }
+
+    const lowEnv = computeBandEnvelopes(lowTone, sr);
+    const midEnv = computeBandEnvelopes(midTone, sr);
+
+    const midIdx = Math.floor(lowEnv.total.length / 2);
+    expect(lowEnv.low[midIdx] ?? 0).toBeGreaterThan((lowEnv.mid[midIdx] ?? 0) * 5);
+    expect(midEnv.mid[midIdx] ?? 0).toBeGreaterThan((midEnv.low[midIdx] ?? 0) * 5);
+  });
+
+  test("detects 124 BPM click track with 0.35s downbeat offset within ±1 BPM and 30 ms", () => {
+    const sr = 22050;
+    const pcm = makeClickTrack({ bpm: 124, durationSec: 40, offsetSec: 0.35, sampleRate: sr });
+    const res = detectBeatGrid(pcm, sr);
+
+    expect(res.grid).not.toBeNull();
+    expect(res.confidence).toBe("high");
+    expect(Math.abs((res.grid?.bpm ?? 0) - 124)).toBeLessThanOrEqual(1);
+    expect(Math.abs((res.grid?.firstDownbeatSec ?? 0) - 0.35)).toBeLessThanOrEqual(0.03);
+  });
+
+  test("detects 128 BPM click track with 1.15s downbeat offset within ±1 BPM and 30 ms", () => {
+    const sr = 22050;
+    const pcm = makeClickTrack({ bpm: 128, durationSec: 45, offsetSec: 1.15, sampleRate: sr });
+    const res = detectBeatGrid(pcm, sr);
+
+    expect(res.grid).not.toBeNull();
+    expect(res.confidence).toBe("high");
+    expect(Math.abs((res.grid?.bpm ?? 0) - 128)).toBeLessThanOrEqual(1);
+    expect(Math.abs((res.grid?.firstDownbeatSec ?? 0) - 1.15)).toBeLessThanOrEqual(0.03);
+  });
+
+  test("detects 96 BPM click track after a 4.2s silent intro within ±1 BPM and 30 ms", () => {
+    const sr = 22050;
+    const pcm = makeClickTrack({ bpm: 96, durationSec: 50, offsetSec: 4.2, sampleRate: sr });
+    const res = detectBeatGrid(pcm, sr);
+
+    expect(res.grid).not.toBeNull();
+    expect(res.confidence).toBe("high");
+    expect(Math.abs((res.grid?.bpm ?? 0) - 96)).toBeLessThanOrEqual(1);
+    expect(Math.abs((res.grid?.firstDownbeatSec ?? 0) - 4.2)).toBeLessThanOrEqual(0.03);
+  });
+
+  test("detects 140 BPM click track starting at 0.0s within ±1 BPM and 30 ms", () => {
+    const sr = 22050;
+    const pcm = makeClickTrack({ bpm: 140, durationSec: 36, offsetSec: 0, sampleRate: sr });
+    const res = detectBeatGrid(pcm, sr);
+
+    expect(res.grid).not.toBeNull();
+    expect(res.confidence).toBe("high");
+    expect(Math.abs((res.grid?.bpm ?? 0) - 140)).toBeLessThanOrEqual(1);
+    expect(Math.abs(res.grid?.firstDownbeatSec ?? 99)).toBeLessThanOrEqual(0.03);
+  });
+
+  test("returns null grid and low confidence for a beatless sustained drone", () => {
+    const sr = 22050;
+    const pcm = new Float32Array(sr * 20);
+    for (let i = 0; i < pcm.length; i++) {
+      pcm[i] = 0.25 * Math.sin((2 * Math.PI * 220 * i) / sr);
+    }
+    const res = detectBeatGrid(pcm, sr);
+    expect(res.grid).toBeNull();
+    expect(res.confidence).toBe("low");
+  });
+
+  test("returns null grid and low confidence for aperiodic noise", () => {
+    const sr = 22050;
+    const pcm = new Float32Array(sr * 20);
+    let seed = 1337;
+    for (let i = 0; i < pcm.length; i++) {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      pcm[i] = ((seed / 0xffffffff) * 2 - 1) * 0.35;
+    }
+    const res = detectBeatGrid(pcm, sr);
+    expect(res.grid).toBeNull();
+    expect(res.confidence).toBe("low");
   });
 });
