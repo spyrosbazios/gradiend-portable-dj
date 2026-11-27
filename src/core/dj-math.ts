@@ -121,10 +121,10 @@ export interface CueSpot {
   reason: string;
 }
 
-export const TRACK_CUES_VERSION = 1 as const;
+export const TRACK_CUES_VERSION = 2 as const;
 
 export interface TrackCues {
-  version: 1;
+  version: typeof TRACK_CUES_VERSION;
   grid: BeatGrid | null;
   entries: CueSpot[];
   exits: CueSpot[];

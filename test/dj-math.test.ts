@@ -11,6 +11,7 @@ import {
   findCueSpot,
   formatTime,
   getActiveExitSpot,
+  TRACK_CUES_VERSION,
   getExitQualityAtTime,
   getIdleDeck,
   getLiveDeck,
@@ -527,7 +528,7 @@ describe("Transition cue analysis (phrase features, ratings, fallback)", () => {
     const pcm = makeStructuredTrack({ bpm: 120, offsetSec: 0.25, sampleRate: sr });
     const { bpm, cues } = analyzeTrackCues(pcm, sr);
 
-    expect(cues.version).toBe(1);
+    expect(cues.version).toBe(TRACK_CUES_VERSION);
     expect(cues.confidence).toBe("high");
     expect(cues.grid).not.toBeNull();
     expect(Math.abs((bpm ?? 0) - 120)).toBeLessThanOrEqual(1);
@@ -580,7 +581,7 @@ describe("Transition cue analysis (phrase features, ratings, fallback)", () => {
 
   test("advances active exit flag to next good exit when playhead passes suggested flag", () => {
     const cues = {
-      version: 1 as const,
+      version: TRACK_CUES_VERSION,
       grid: { bpm: 120, firstDownbeatSec: 0 },
       entries: [],
       exits: [
