@@ -397,13 +397,16 @@ export function DjConsole({
 
   const transitionBadgeLabel = useMemo(() => {
     if (activeTransitionLabel) return activeTransitionLabel;
-    if (!upcomingTransitionPlan) return null;
-    if (mixOutSkipped) return "Auto mix-out off for this track";
+    if (mixOutSkipped && autoPlayEnabled) return "Auto mix-out off for this track";
+    // Auto-play mixes out even before UP NEXT is staged, so the badge (and its cancel button)
+    // must show whenever a mix-out is coming, not only once a plan exists.
+    const planLabel = upcomingTransitionPlan?.label ?? (autoPlayEnabled ? "Auto mix-out" : null);
+    if (!planLabel) return null;
     if (liveSnapshot?.isPlaying && liveExitSpot) {
       const secsUntilFlag = Math.max(0, liveExitSpot.sec - liveSnapshot.currentTime);
-      return `In ${formatCountdown(secsUntilFlag)} · ${upcomingTransitionPlan.label}`;
+      return `In ${formatCountdown(secsUntilFlag)} · ${planLabel}`;
     }
-    return upcomingTransitionPlan.label;
+    return upcomingTransitionPlan ? planLabel : null;
   }, [
     isAutoFading,
     activeTransitionLabel,
@@ -412,6 +415,7 @@ export function DjConsole({
     liveSnapshot?.currentTime,
     liveExitSpot,
     mixOutSkipped,
+    autoPlayEnabled,
   ]);
 
   const nextBeatQuality: SpotQuality | null = useMemo(() => {
