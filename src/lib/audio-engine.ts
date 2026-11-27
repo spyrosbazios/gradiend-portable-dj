@@ -167,10 +167,7 @@ export class DjAudioEngine {
 
     audio.addEventListener("loadedmetadata", () => {
       if (Number.isFinite(audio.duration)) {
-        internals.snapshot = {
-          ...internals.snapshot,
-          duration: audio.duration,
-        };
+        internals.snapshot = { ...internals.snapshot, duration: audio.duration };
         this.emit();
       }
     });
@@ -497,9 +494,7 @@ export class DjAudioEngine {
     }
 
     const initialCues =
-      track.cues && track.cues.version === TRACK_CUES_VERSION
-        ? track.cues
-        : null;
+      track.cues && track.cues.version === TRACK_CUES_VERSION ? track.cues : null;
 
     d.snapshot = {
       track,
@@ -548,12 +543,7 @@ export class DjAudioEngine {
           if (d.loadSeq !== seq) return;
           cues = analysis.cues;
           detectedBpm = detectedBpm ?? analysis.bpm;
-          analysisScheduler.recordResult(
-            track,
-            detectedBpm,
-            cues,
-            audioBuf.duration,
-          );
+          analysisScheduler.recordResult(track, detectedBpm, cues, audioBuf.duration);
         }
       }
 
@@ -570,11 +560,7 @@ export class DjAudioEngine {
         bpm: detectedBpm,
       };
       if (d.autoGainNode && this.ctx) {
-        d.autoGainNode.gain.setTargetAtTime(
-          autoGain,
-          this.ctx.currentTime,
-          0.02,
-        );
+        d.autoGainNode.gain.setTargetAtTime(autoGain, this.ctx.currentTime, 0.02);
       }
       this.emit();
     } catch {
@@ -652,10 +638,7 @@ export class DjAudioEngine {
     if (d.softStopGainNode && this.ctx) {
       const now = this.ctx.currentTime;
       d.softStopGainNode.gain.cancelScheduledValues(now);
-      d.softStopGainNode.gain.setValueAtTime(
-        d.softStopGainNode.gain.value,
-        now,
-      );
+      d.softStopGainNode.gain.setValueAtTime(d.softStopGainNode.gain.value, now);
       d.softStopGainNode.gain.linearRampToValueAtTime(0.0001, now + 0.35);
       d.softStopTimerId = window.setTimeout(() => {
         d.softStopTimerId = null;
@@ -685,8 +668,7 @@ export class DjAudioEngine {
       return;
     }
 
-    const currentBar =
-      d.snapshot.selectedEntryBar ?? d.snapshot.cues?.bestEntryBar ?? 0;
+    const currentBar = d.snapshot.selectedEntryBar ?? d.snapshot.cues?.bestEntryBar ?? 0;
     const currIdx = Math.max(
       0,
       entries.findIndex((s) => s.bar === currentBar),
@@ -695,11 +677,7 @@ export class DjAudioEngine {
     const nextSpot = entries[nextIdx];
     if (!nextSpot || nextSpot.bar === d.snapshot.selectedEntryBar) return;
 
-    d.snapshot = {
-      ...d.snapshot,
-      selectedEntryBar: nextSpot.bar,
-      manualEntrySec: null,
-    };
+    d.snapshot = { ...d.snapshot, selectedEntryBar: nextSpot.bar, manualEntrySec: null };
     // A deck pre-running muted follows its flag so a hand mix starts from it.
     if (!d.audio.paused && !this.isDeckAudible(id) && this.mix === null) {
       this.cueToSelectedEntry(id);
@@ -727,16 +705,9 @@ export class DjAudioEngine {
     if (!d.snapshot.track) return;
     const dur = d.snapshot.duration || d.audio.duration;
     if (!Number.isFinite(dur) || dur <= 0) return;
-    const next = Math.min(
-      Math.max(0, d.audio.currentTime + deltaSeconds),
-      Math.max(0, dur - 0.5),
-    );
+    const next = Math.min(Math.max(0, d.audio.currentTime + deltaSeconds), Math.max(0, dur - 0.5));
     d.audio.currentTime = next;
-    d.snapshot = {
-      ...d.snapshot,
-      currentTime: next,
-      manualEntrySec: this.manualEntryAfterSeek(id, next),
-    };
+    d.snapshot = { ...d.snapshot, currentTime: next, manualEntrySec: this.manualEntryAfterSeek(id, next) };
     this.emit();
   }
 
@@ -783,11 +754,7 @@ export class DjAudioEngine {
   setMasterVolume(vol: number): void {
     this.masterVolume = Math.min(1, Math.max(0, vol));
     if (this.masterGain && this.ctx) {
-      this.masterGain.gain.setTargetAtTime(
-        this.masterVolume,
-        this.ctx.currentTime,
-        0.015,
-      );
+      this.masterGain.gain.setTargetAtTime(this.masterVolume, this.ctx.currentTime, 0.015);
     } else {
       this.applyCrossfadeGains();
     }
@@ -856,17 +823,15 @@ export class DjAudioEngine {
       waitSec = Math.max(0, (targetBarSec - outNowSec) / rate);
     }
 
+    // A hand-set entry has no analysed phrase quality.
     const selectedEntry =
-      targetInternals.snapshot.manualEntrySec === null
-        ? this.selectedEntrySpot(targetDeck)
-        : null;
+      targetInternals.snapshot.manualEntrySec === null ? this.selectedEntrySpot(targetDeck) : null;
 
     const exitQuality =
       targetBarSec !== null
         ? getExitQualityAtTime(oldCues, targetBarSec)
         : oldCues
-          ? (getActiveExitSpot(oldCues, oldInternals.audio.currentTime)
-              ?.quality ?? null)
+          ? (getActiveExitSpot(oldCues, oldInternals.audio.currentTime)?.quality ?? null)
           : null;
 
     const combinedConfidence: "high" | "low" | undefined = !oldPlaying
@@ -890,21 +855,17 @@ export class DjAudioEngine {
       oldInternals.snapshot.bpm ?? oldInternals.snapshot.track?.bpm ?? null,
     );
     const mixStartSec = targetBarSec ?? oldInternals.audio.currentTime;
-    const oldDuration =
-      oldInternals.snapshot.duration || oldInternals.audio.duration || 0;
+    const oldDuration = oldInternals.snapshot.duration || oldInternals.audio.duration || 0;
     const plan = planMixTransition({
       mode: effectiveMode,
       barsAvailable:
         oldPlaying && oldDuration > 0
-          ? (oldDuration - mixStartSec) /
-            (barFadeDurationMs(fromTempo, 1) / 1000)
+          ? (oldDuration - mixStartSec) / (barFadeDurationMs(fromTempo, 1) / 1000)
           : undefined,
       fromBpm: fromTempo,
       toBpm: mixTempo(
         targetCues,
-        targetInternals.snapshot.bpm ??
-          targetInternals.snapshot.track?.bpm ??
-          null,
+        targetInternals.snapshot.bpm ?? targetInternals.snapshot.track?.bpm ?? null,
       ),
       fadeBars: this.fadeBars,
       confidence: combinedConfidence,
@@ -919,26 +880,13 @@ export class DjAudioEngine {
         ? { outGrid: oldGrid, inGrid, tempoMultiplier: plan.tempoMultiplier }
         : null;
 
-    return {
-      oldDeck,
-      targetDeck,
-      plan,
-      targetBarSec,
-      waitSec,
-      selectedEntry,
-      lockGrids,
-    };
+    return { oldDeck, targetDeck, plan, targetBarSec, waitSec, selectedEntry, lockGrids };
   }
 
   private selectedEntrySpot(id: DeckId): CueSpot | null {
     const d = this.decks[id];
     const cues = d.snapshot.cues;
-    return cues
-      ? findCueSpot(
-          cues.entries,
-          d.snapshot.selectedEntryBar ?? cues.bestEntryBar,
-        )
-      : null;
+    return cues ? findCueSpot(cues.entries, d.snapshot.selectedEntryBar ?? cues.bestEntryBar) : null;
   }
 
   /**
@@ -947,16 +895,14 @@ export class DjAudioEngine {
    */
   private manualEntryAfterSeek(id: DeckId, sec: number): number | null {
     const d = this.decks[id];
-    const idle =
-      !this.isDeckAudible(id) && this.mix === null && !this.isAutoFading;
+    const idle = !this.isDeckAudible(id) && this.mix === null && !this.isAutoFading;
     return idle ? sec : d.snapshot.manualEntrySec;
   }
 
   /** Moves a deck to its entry point: the hand-set position, else the flag (used before it is brought in). */
   cueToSelectedEntry(id: DeckId, leadSec = 0): void {
     const d = this.decks[id];
-    const entrySec =
-      d.snapshot.manualEntrySec ?? this.selectedEntrySpot(id)?.sec;
+    const entrySec = d.snapshot.manualEntrySec ?? this.selectedEntrySpot(id)?.sec;
     if (entrySec === undefined) return;
     const dur = d.snapshot.duration || d.audio.duration || 0;
     if (entrySec < 0 || (dur > 0 && entrySec >= dur - 2)) return;
@@ -975,39 +921,21 @@ export class DjAudioEngine {
     if (!this.ctx) return;
     const now = this.ctx.currentTime;
     if (prepared.plan.echoDelaySec > 0 && oldInternals.echoDelayNode) {
-      oldInternals.echoDelayNode.delayTime.setValueAtTime(
-        prepared.plan.echoDelaySec,
-        now,
-      );
+      oldInternals.echoDelayNode.delayTime.setValueAtTime(prepared.plan.echoDelaySec, now);
     }
-    const initialDsp = computeTransitionDsp(
-      prepared.plan.technique,
-      0,
-      prepared.plan.fadeBars,
-    );
+    const initialDsp = computeTransitionDsp(prepared.plan.technique, 0, prepared.plan.fadeBars);
     if (targetInternals.bassFilterNode) {
-      targetInternals.bassFilterNode.gain.setValueAtTime(
-        initialDsp.incoming.bassDb,
-        now,
-      );
+      targetInternals.bassFilterNode.gain.setValueAtTime(initialDsp.incoming.bassDb, now);
     }
     if (targetInternals.hpfFilterNode) {
-      targetInternals.hpfFilterNode.frequency.setValueAtTime(
-        initialDsp.incoming.hpfHz,
-        now,
-      );
+      targetInternals.hpfFilterNode.frequency.setValueAtTime(initialDsp.incoming.hpfHz, now);
     }
     if (targetInternals.echoSendNode) {
       targetInternals.echoSendNode.gain.setValueAtTime(0, now);
     }
   }
 
-  private createMix(
-    seq: number,
-    prepared: PreparedMix,
-    startVal: number,
-    driver: MixDriver,
-  ): ActiveMix {
+  private createMix(seq: number, prepared: PreparedMix, startVal: number, driver: MixDriver): ActiveMix {
     const startGains = equalPowerGains(startVal);
     return {
       seq,
@@ -1018,10 +946,8 @@ export class DjAudioEngine {
       lockGrids: prepared.lockGrids,
       startVal,
       endVal: prepared.targetDeck === "A" ? 0 : 1,
-      startOutGain:
-        prepared.oldDeck === "A" ? startGains.gainA : startGains.gainB,
-      startInGain:
-        prepared.targetDeck === "A" ? startGains.gainA : startGains.gainB,
+      startOutGain: prepared.oldDeck === "A" ? startGains.gainA : startGains.gainB,
+      startInGain: prepared.targetDeck === "A" ? startGains.gainA : startGains.gainB,
       progress: 0,
       autoFromProgress: 0,
       autoStartedAt: 0,
@@ -1039,11 +965,7 @@ export class DjAudioEngine {
     const oldDeck: DeckId = towardB ? "A" : "B";
     const endVal = towardB ? 1 : 0;
     if (this.crossfade === prev || Math.abs(endVal - prev) < 0.2) return false;
-    if (
-      this.decks[oldDeck].audio.paused ||
-      !this.decks[targetDeck].snapshot.track
-    )
-      return false;
+    if (this.decks[oldDeck].audio.paused || !this.decks[targetDeck].snapshot.track) return false;
     // The fader must come from the playing deck's side.
     if (towardB ? prev > 0.5 : prev < 0.5) return false;
 
@@ -1056,9 +978,7 @@ export class DjAudioEngine {
     const targetInternals = this.decks[targetDeck];
     if (targetInternals.audio.paused) {
       // Start early by the time left to the next bar line so the entry lands on beat 1.
-      const lead = prepared.lockGrids
-        ? prepared.waitSec * prepared.plan.initialPlaybackRate
-        : 0;
+      const lead = prepared.lockGrids ? prepared.waitSec * prepared.plan.initialPlaybackRate : 0;
       this.cueToSelectedEntry(targetDeck, lead);
     }
     this.armIncoming(prepared);
@@ -1080,10 +1000,7 @@ export class DjAudioEngine {
   /** Progress (0..1) whose eased fader position equals the current crossfade. */
   private handProgress(mix: ActiveMix): number {
     const span = mix.endVal - mix.startVal;
-    const frac =
-      span === 0
-        ? 1
-        : Math.min(1, Math.max(0, (this.crossfade - mix.startVal) / span));
+    const frac = span === 0 ? 1 : Math.min(1, Math.max(0, (this.crossfade - mix.startVal) / span));
     return frac < 0.5 ? Math.sqrt(frac / 2) : 1 - Math.sqrt((1 - frac) / 2);
   }
 
@@ -1115,55 +1032,19 @@ export class DjAudioEngine {
     const oldInternals = this.decks[mix.oldDeck];
     const targetInternals = this.decks[mix.targetDeck];
     const audioNow = this.ctx.currentTime;
-    const { outgoing, incoming } = computeTransitionDsp(
-      mix.plan.technique,
-      t,
-      mix.plan.fadeBars,
-    );
+    const { outgoing, incoming } = computeTransitionDsp(mix.plan.technique, t, mix.plan.fadeBars);
     const outGain = mix.startOutGain * outgoing.gain;
     const inGain = mix.startInGain + (1 - mix.startInGain) * incoming.gain;
 
-    oldInternals.crossfadeGainNode?.gain.setTargetAtTime(
-      outGain,
-      audioNow,
-      0.015,
-    );
-    oldInternals.bassFilterNode?.gain.setTargetAtTime(
-      outgoing.bassDb,
-      audioNow,
-      0.02,
-    );
-    oldInternals.hpfFilterNode?.frequency.setTargetAtTime(
-      outgoing.hpfHz,
-      audioNow,
-      0.025,
-    );
-    oldInternals.echoSendNode?.gain.setTargetAtTime(
-      outgoing.echoSend,
-      audioNow,
-      0.015,
-    );
+    oldInternals.crossfadeGainNode?.gain.setTargetAtTime(outGain, audioNow, 0.015);
+    oldInternals.bassFilterNode?.gain.setTargetAtTime(outgoing.bassDb, audioNow, 0.02);
+    oldInternals.hpfFilterNode?.frequency.setTargetAtTime(outgoing.hpfHz, audioNow, 0.025);
+    oldInternals.echoSendNode?.gain.setTargetAtTime(outgoing.echoSend, audioNow, 0.015);
 
-    targetInternals.crossfadeGainNode?.gain.setTargetAtTime(
-      inGain,
-      audioNow,
-      0.015,
-    );
-    targetInternals.bassFilterNode?.gain.setTargetAtTime(
-      incoming.bassDb,
-      audioNow,
-      0.02,
-    );
-    targetInternals.hpfFilterNode?.frequency.setTargetAtTime(
-      incoming.hpfHz,
-      audioNow,
-      0.02,
-    );
-    targetInternals.echoSendNode?.gain.setTargetAtTime(
-      incoming.echoSend,
-      audioNow,
-      0.015,
-    );
+    targetInternals.crossfadeGainNode?.gain.setTargetAtTime(inGain, audioNow, 0.015);
+    targetInternals.bassFilterNode?.gain.setTargetAtTime(incoming.bassDb, audioNow, 0.02);
+    targetInternals.hpfFilterNode?.frequency.setTargetAtTime(incoming.hpfHz, audioNow, 0.02);
+    targetInternals.echoSendNode?.gain.setTargetAtTime(incoming.echoSend, audioNow, 0.015);
   }
 
   private finishMix(mix: ActiveMix): void {
@@ -1187,10 +1068,7 @@ export class DjAudioEngine {
     if (targetInternals.audio.playbackRate !== 1) {
       this.glideTempoToNatural(mix.targetDeck, 3500);
     }
-    targetInternals.snapshot = {
-      ...targetInternals.snapshot,
-      waveformLocked: true,
-    };
+    targetInternals.snapshot = { ...targetInternals.snapshot, waveformLocked: true };
     this.emit();
     this.onMixComplete?.(mix.oldDeck);
   }
@@ -1226,8 +1104,7 @@ export class DjAudioEngine {
       if (mix.driver === "auto") {
         const t = Math.min(
           1,
-          mix.autoFromProgress +
-            (now - mix.autoStartedAt) / mix.plan.durationMs,
+          mix.autoFromProgress + (now - mix.autoStartedAt) / mix.plan.durationMs,
         );
         const eased = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
         this.crossfade = mix.startVal + (mix.endVal - mix.startVal) * eased;
@@ -1321,9 +1198,7 @@ export class DjAudioEngine {
 
     this.lastStartErrorMs =
       targetBarSec !== null
-        ? Math.round(
-            Math.abs(oldInternals.audio.currentTime - targetBarSec) * 1000,
-          )
+        ? Math.round(Math.abs(oldInternals.audio.currentTime - targetBarSec) * 1000)
         : null;
 
     const mix = this.createMix(seq, prepared, this.crossfade, "auto");
@@ -1342,11 +1217,7 @@ interface PreparedMix {
   targetBarSec: number | null;
   waitSec: number;
   selectedEntry: CueSpot | null;
-  lockGrids: {
-    outGrid: BeatGrid;
-    inGrid: BeatGrid;
-    tempoMultiplier: number;
-  } | null;
+  lockGrids: { outGrid: BeatGrid; inGrid: BeatGrid; tempoMultiplier: number } | null;
 }
 
 interface ActiveMix {
